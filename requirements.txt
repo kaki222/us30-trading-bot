@@ -1,0 +1,6 @@
+pandas
+numpy
+yfinance
+backtesting
+matplotlib
+scikit-learn
