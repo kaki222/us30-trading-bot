@@ -4,3 +4,4 @@ yfinance
 backtesting
 matplotlib
 scikit-learn
+ipykernel
