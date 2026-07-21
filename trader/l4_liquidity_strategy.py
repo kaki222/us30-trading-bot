@@ -9,6 +9,7 @@ from backtesting import Strategy
 class LiquiditySweepStrategy(Strategy):
     max_bars_to_bos = 9
     max_pullback_bars = 12
+    target_rr = 2.0   # TP = entry +/- (SL distance * target_rr)
 
     def init(self):
         pass  # all inputs are precomputed columns from build_liquidity_features
@@ -63,13 +64,17 @@ class LiquiditySweepStrategy(Strategy):
             return
 
         if self.phase == "ARMED":
-            if self.direction == "bear" and d.bear_engulf[-1]:
-                sl, tp = d.ltf_pivot_high[-1], d.htf_pivot_low_2back[-1]
-                if pd.notna(sl) and pd.notna(tp) and sl > c > tp:
-                    self.sell(sl=sl, tp=tp)
-                self.phase = "IDLE"
-            elif self.direction == "bull" and d.bull_engulf[-1]:
-                sl, tp = d.ltf_pivot_low[-1], d.htf_pivot_high_2back[-1]
-                if pd.notna(sl) and pd.notna(tp) and sl < c < tp:
-                    self.buy(sl=sl, tp=tp)
-                self.phase = "IDLE"
+                    if self.direction == "bear" and d.bear_engulf[-1]:
+                        sl = d.ltf_pivot_high[-1]
+                        if pd.notna(sl) and sl > c:
+                            sl_distance = sl - c
+                            tp = c - sl_distance * self.target_rr
+                            self.sell(sl=sl, tp=tp, size=0.1)
+                        self.phase = "IDLE"
+                    elif self.direction == "bull" and d.bull_engulf[-1]:
+                        sl = d.ltf_pivot_low[-1]
+                        if pd.notna(sl) and sl < c:
+                            sl_distance = c - sl
+                            tp = c + sl_distance * self.target_rr
+                            self.buy(sl=sl, tp=tp, size=0.1)
+                        self.phase = "IDLE"

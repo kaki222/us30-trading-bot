@@ -9,7 +9,12 @@ structure helpers used for breakout detection.
 import numpy as np
 import pandas as pd
 
-from .l1_data import fetch_h4
+from .l1_data import load_h4
+
+# build_bt_df() used to take Yahoo Finance tickers. Keep those working so
+# existing notebook cells (build_bt_df("^DJI"), build_bt_df("GC=F")) don't
+# need edits — they now resolve to the MT5-backed loaders in l1_data.
+_LEGACY_SYMBOL_MAP = {"^DJI": "US30", "GC=F": "GOLD"}
 
 
 def sma(series, length):
@@ -62,11 +67,16 @@ def swing_low(low, n):
 
 def build_bt_df(symbol, start=None, period="730d"):
     """
-    Layers 1+2 combined: fetch a symbol and attach every indicator
-    column, renamed to the Open/High/Low/Close/Volume capitalization
-    backtesting.py expects.
+    Layers 1+2 combined: load a symbol's H4 bars from its MT5 export and
+    attach every indicator column, renamed to the Open/High/Low/Close/Volume
+    capitalization backtesting.py expects.
+
+    `start`/`period` are no longer used — MT5 exports are loaded in full
+    (kept as accepted-but-ignored params so existing call sites don't
+    break) — and now return the entire history instead of yfinance's
+    730-day intraday cap.
     """
-    d = fetch_h4(symbol, start=start, period=period)
+    d = load_h4(_LEGACY_SYMBOL_MAP.get(symbol, symbol))
     d["ma_360"] = sma(d["close"], 360)
     d["ma_200"] = sma(d["close"], 200)
     d["ma_89"] = sma(d["close"], 89)
@@ -176,4 +186,54 @@ def build_liquidity_features(
     d["htf_pivot_high_2back"] = nth_pivot_price(d["High"], True, pivot_htf_k, pivot_htf_k, n_back=2)
     d["htf_pivot_low_2back"] = nth_pivot_price(d["Low"], False, pivot_htf_k, pivot_htf_k, n_back=2)
 
+    return d
+
+def kalman_trend(price: pd.Series, process_var: float, measurement_var: float) -> pd.DataFrame:
+    """
+    Local-linear-trend Kalman filter on `price`. Returns 'level' (smoothed
+    price) and 'slope' (estimated per-bar rate of change).
+
+    process_var: how much level+slope are expected to drift bar-to-bar
+                 (higher = more responsive, less smooth)
+    measurement_var: how noisy each observed price is assumed to be
+                 (higher = smoother, laggier)
+    """
+    prices = price.values
+    n = len(prices)
+
+    x = np.array([prices[0], 0.0])          # state: [level, slope]
+    P = np.eye(2) * 1.0
+    F = np.array([[1.0, 1.0], [0.0, 1.0]])   # level += slope each step
+    H = np.array([[1.0, 0.0]])               # we observe level only
+    Q = np.eye(2) * process_var
+    R = measurement_var
+
+    levels, slopes = np.empty(n), np.empty(n)
+    for t in range(n):
+        x = F @ x
+        P = F @ P @ F.T + Q
+
+        y = prices[t] - (H @ x)[0]
+        S = (H @ P @ H.T)[0, 0] + R
+        K = (P @ H.T).flatten() / S
+        x = x + K * y
+        P = (np.eye(2) - np.outer(K, H)) @ P
+
+        levels[t], slopes[t] = x[0], x[1]
+
+    return pd.DataFrame({"level": levels, "slope": slopes}, index=price.index)
+
+
+def build_kalman_features(
+    df,
+    fast_process_var=1e-4, fast_measurement_var=1e-2,   # entry-timing horizon
+    slow_process_var=1e-7, slow_measurement_var=1e-2,   # macro-bias horizon
+):
+    d = df.copy()
+    fast = kalman_trend(d["Close"], fast_process_var, fast_measurement_var)
+    slow = kalman_trend(d["Close"], slow_process_var, slow_measurement_var)
+    d["kalman_fast_level"] = fast["level"]
+    d["kalman_fast_slope"] = fast["slope"]
+    d["kalman_slow_level"] = slow["level"]
+    d["kalman_slow_slope"] = slow["slope"]
     return d
