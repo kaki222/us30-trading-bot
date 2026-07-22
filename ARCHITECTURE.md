@@ -16,7 +16,7 @@ edited to say otherwise.
 | 3 | Regime Recognition | `trader/l3_regime.py` | ⚠️ Partially wired in |
 | 4 | Signal Model | `trader/l4_signal_model.py`, `trader/l4_liquidity_strategy.py` | ✅ Rule-based, done; not yet ML |
 | 5 | Position Sizing | *(none — inferred)* | ❌ Not started |
-| 6 | Risk Overlay | inline in `l4_signal_model.py` | ⚠️ Exists, not extracted |
+| 6 | Risk Overlay | `trader/l6_risk.py` | ✅ Extracted, shared by all Layer 4 strategies |
 | 7 | Execution | *(none — inferred)* | ❌ Not started |
 
 ---
@@ -112,26 +112,27 @@ No dedicated module. Every `self.buy()`/`self.sell()` call across both
 Layer 4 files hardcodes `size=0.1`. No volatility-adjusted sizing,
 no account-risk-% sizing, no per-instrument sizing logic.
 
-## Layer 6 — Risk Overlay *(exists, not extracted)*
+## Layer 6 — Risk Overlay (`trader/l6_risk.py`)
 
-Lives inline inside `ConfluenceStrategy.next()` in `l4_signal_model.py`,
-marked in its own comment as `"temporarily inline"`:
+`CircuitBreakerMixin`: tracks consecutive losing trades via
+`self.closed_trades`; after `max_consecutive_losses` (default 3) in a
+row, forces a `cooldown_bars` (default 20) pause before the strategy
+will open a new position. Mix-in pattern — a strategy calls `_cb_init()`
+from `init()`, `_cb_update()` once per bar in `next()`, and gates entries
+with `_cb_in_cooldown()`.
 
-```python
-# --- Layer 6 (risk overlay: circuit breaker), temporarily inline ---
-```
+Wired into all three Layer 4 strategies:
+- `ConfluenceStrategy` / `RegimeConfluenceStrategy` — extracted from what
+  used to be inline logic in `next()`; verified behavior-preserving
+  (identical trade counts/returns before and after extraction).
+- `LiquiditySweepStrategy` — had **no** circuit breaker before this; now
+  gated at the two entry points (bear/bull engulf in the `ARMED` phase)
+  rather than freezing the whole sweep/BOS/pullback state machine, so
+  cooldown blocks new positions without discarding in-progress setup
+  tracking.
 
-Behavior: tracks consecutive losing trades; after `max_consecutive_losses`
-(default 3) in a row, forces a `cooldown_bars` (default 20) pause before
-the strategy will open a new position. `RegimeConfluenceStrategy`
-inherits this unchanged (it only overrides the regime gate).
-
-Not present in `LiquiditySweepStrategy` at all — that strategy has no
-circuit breaker.
-
-**Next planned step:** extract this into its own module/mixin so both
-Layer 4 strategies can share one implementation instead of it being
-ADX-strategy-only inline logic.
+Confirmed the breaker actually engages (not just present but inert) for
+all three strategies × both instruments.
 
 ## Layer 7 — Execution *(not started)*
 
