@@ -14,15 +14,16 @@ from backtesting import Strategy
 
 from .l2_features import swing_high, swing_low
 from .l3_regime import efficiency_ratio
+from .l6_risk import CircuitBreakerMixin
 
 
-class ConfluenceStrategy(Strategy):
+class ConfluenceStrategy(CircuitBreakerMixin, Strategy):
     adx_threshold = 22
     swing_lookback = 20
     atr_sl_mult = 1.5
     atr_tp_mult = 2.5
-    max_consecutive_losses = 3
-    cooldown_bars = 20
+    # max_consecutive_losses / cooldown_bars: inherited from
+    # CircuitBreakerMixin (Layer 6). Override here per-strategy if needed.
 
     def init(self):
         d = self.data.df
@@ -37,9 +38,7 @@ class ConfluenceStrategy(Strategy):
         self.atr_14 = self.I(lambda: d["atr_14"], name="ATR14")
         self.swing_hi = self.I(lambda: swing_high(d["High"], self.swing_lookback), name="SwingHi")
         self.swing_lo = self.I(lambda: swing_low(d["Low"], self.swing_lookback), name="SwingLo")
-        self._last_closed_count = 0
-        self._consecutive_losses = 0
-        self._cooldown_until_bar = -1
+        self._cb_init()
 
     def _regime_ok(self) -> bool:
         """Layer 3 gate: is this a tradeable trend? Base version = bare ADX threshold."""
@@ -49,20 +48,9 @@ class ConfluenceStrategy(Strategy):
         return not np.isnan(self.adx_14[-1])
 
     def next(self):
-        # --- Layer 6 (risk overlay: circuit breaker), temporarily inline ---
-        closed = self.closed_trades
-        if len(closed) > self._last_closed_count:
-            for t in closed[self._last_closed_count:]:
-                if t.pl < 0:
-                    self._consecutive_losses += 1
-                else:
-                    self._consecutive_losses = 0
-            self._last_closed_count = len(closed)
-            if self._consecutive_losses >= self.max_consecutive_losses:
-                self._cooldown_until_bar = len(self.data) + self.cooldown_bars
-                self._consecutive_losses = 0
-
-        in_cooldown = len(self.data) < self._cooldown_until_bar
+        # --- Layer 6 (risk overlay: circuit breaker) ---
+        self._cb_update()
+        in_cooldown = self._cb_in_cooldown()
 
         price = self.data.Close[-1]
         atr = self.atr_14[-1]

@@ -5,18 +5,25 @@ l4_liquidity_strategy.py — Layer 4: sweep -> displacement -> BOS -> pullback
 import pandas as pd
 from backtesting import Strategy
 
+from .l6_risk import CircuitBreakerMixin
 
-class LiquiditySweepStrategy(Strategy):
+
+class LiquiditySweepStrategy(CircuitBreakerMixin, Strategy):
     max_bars_to_bos = 9
     max_pullback_bars = 12
     target_rr = 2.0   # TP = entry +/- (SL distance * target_rr)
+    # max_consecutive_losses / cooldown_bars: inherited from
+    # CircuitBreakerMixin (Layer 6) - this strategy had no circuit
+    # breaker at all before it picked one up from here.
 
     def init(self):
-        pass  # all inputs are precomputed columns from build_liquidity_features
+        self._cb_init()
 
     def next(self):
         d = self.data
         c = d.Close[-1]
+
+        self._cb_update()
 
         if self.position:
             return
@@ -66,14 +73,14 @@ class LiquiditySweepStrategy(Strategy):
         if self.phase == "ARMED":
                     if self.direction == "bear" and d.bear_engulf[-1]:
                         sl = d.ltf_pivot_high[-1]
-                        if pd.notna(sl) and sl > c:
+                        if pd.notna(sl) and sl > c and not self._cb_in_cooldown():
                             sl_distance = sl - c
                             tp = c - sl_distance * self.target_rr
                             self.sell(sl=sl, tp=tp, size=0.1)
                         self.phase = "IDLE"
                     elif self.direction == "bull" and d.bull_engulf[-1]:
                         sl = d.ltf_pivot_low[-1]
-                        if pd.notna(sl) and sl < c:
+                        if pd.notna(sl) and sl < c and not self._cb_in_cooldown():
                             sl_distance = c - sl
                             tp = c + sl_distance * self.target_rr
                             self.buy(sl=sl, tp=tp, size=0.1)
