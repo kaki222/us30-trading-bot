@@ -5,6 +5,7 @@ l4_liquidity_strategy.py — Layer 4: sweep -> displacement -> BOS -> pullback
 import pandas as pd
 from backtesting import Strategy
 
+from .l5_position_sizing import risk_based_size
 from .l6_risk import CircuitBreakerMixin
 
 
@@ -12,6 +13,8 @@ class LiquiditySweepStrategy(CircuitBreakerMixin, Strategy):
     max_bars_to_bos = 9
     max_pullback_bars = 12
     target_rr = 2.0   # TP = entry +/- (SL distance * target_rr)
+    risk_pct = 0.01   # Layer 5: risk 1% of equity per trade, sized off SL distance
+    leverage = 30      # must match Backtest(..., margin=1/leverage) - see backtest_harness
     # max_consecutive_losses / cooldown_bars: inherited from
     # CircuitBreakerMixin (Layer 6) - this strategy had no circuit
     # breaker at all before it picked one up from here.
@@ -76,12 +79,14 @@ class LiquiditySweepStrategy(CircuitBreakerMixin, Strategy):
                         if pd.notna(sl) and sl > c and not self._cb_in_cooldown():
                             sl_distance = sl - c
                             tp = c - sl_distance * self.target_rr
-                            self.sell(sl=sl, tp=tp, size=0.1)
+                            size = risk_based_size(c, sl, self.risk_pct, self.leverage)
+                            self.sell(sl=sl, tp=tp, size=size)
                         self.phase = "IDLE"
                     elif self.direction == "bull" and d.bull_engulf[-1]:
                         sl = d.ltf_pivot_low[-1]
                         if pd.notna(sl) and sl < c and not self._cb_in_cooldown():
                             sl_distance = c - sl
                             tp = c + sl_distance * self.target_rr
-                            self.buy(sl=sl, tp=tp, size=0.1)
+                            size = risk_based_size(c, sl, self.risk_pct, self.leverage)
+                            self.buy(sl=sl, tp=tp, size=size)
                         self.phase = "IDLE"

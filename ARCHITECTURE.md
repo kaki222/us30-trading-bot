@@ -15,7 +15,7 @@ edited to say otherwise.
 | 2 | Feature Engineering | `trader/l2_features.py` | ✅ Done |
 | 3 | Regime Recognition | `trader/l3_regime.py` | ⚠️ Partially wired in |
 | 4 | Signal Model | `trader/l4_signal_model.py`, `trader/l4_liquidity_strategy.py` | ✅ Rule-based, done; not yet ML |
-| 5 | Position Sizing | *(none — inferred)* | ❌ Not started |
+| 5 | Position Sizing | `trader/l5_position_sizing.py` | ✅ Risk-based, wired into all strategies |
 | 6 | Risk Overlay | `trader/l6_risk.py` | ✅ Extracted, shared by all Layer 4 strategies |
 | 7 | Execution | *(none — inferred)* | ❌ Not started |
 
@@ -106,11 +106,36 @@ Two independent strategy families, both rule-based (the docstring's
   `notebooks/04_liquidity_sweep.ipynb`. Not yet re-run against the full
   MT5 history the way the two `l4_signal_model` strategies were.
 
-## Layer 5 — Position Sizing *(not started)*
+## Layer 5 — Position Sizing (`trader/l5_position_sizing.py`)
 
-No dedicated module. Every `self.buy()`/`self.sell()` call across both
-Layer 4 files hardcodes `size=0.1`. No volatility-adjusted sizing,
-no account-risk-% sizing, no per-instrument sizing logic.
+`risk_based_size(price, sl, risk_pct, leverage)`: replaces the old
+hardcoded `size=0.1` on every entry across both Layer 4 files. Returns
+the `size` fraction such that if the stop-loss is hit, the loss equals
+exactly `risk_pct` of current equity (default 1%) — independent of how
+wide that particular trade's stop happens to be, and independent of
+leverage (which only changes cash tied up, not risk). Every strategy
+now carries `risk_pct` and `leverage` class attributes; `leverage` must
+match `Backtest(..., margin=1/leverage)` — `backtest_harness.py` now
+derives `margin` from `strategy_cls.leverage` instead of hardcoding it,
+so the two can't drift apart.
+
+**Real gotcha found while wiring this in:** backtesting.py only trades
+whole units — no fractional contracts. Since
+`units = floor(cash * risk_pct / sl_distance)` (price and leverage
+cancel out of that formula entirely), a fixed `cash=25_000` meant that
+once US30's price grew past the mid-$20ks, any setup with a stop wider
+than roughly $250 silently rounded down to 0 units and the trade just
+never executed — no error, no warning, it's just gone.
+`LiquiditySweepStrategy`, whose stops are structural/pivot-based (wider
+than the ATR-based stops the other two strategies use), lost **74%** of
+its trade count to this (50 → 13) and stopped trading entirely after
+March 2024. `ConfluenceStrategy`/`RegimeConfluenceStrategy` lost ~23%
+each. Gold was essentially unaffected (its price never got close to
+$25k). Fixed by raising the walk-forward harness's default `cash` from
+25,000 to **100,000** (`backtest_harness.run_fold`/`walk_forward`) —
+verified trade counts recover to at least the pre-Layer-5 fixed-size
+levels across the full 2016–2026 range, and $150k/$250k don't move the
+numbers further, so $100k isn't an arbitrary bump.
 
 ## Layer 6 — Risk Overlay (`trader/l6_risk.py`)
 

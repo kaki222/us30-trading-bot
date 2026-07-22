@@ -14,6 +14,7 @@ from backtesting import Strategy
 
 from .l2_features import swing_high, swing_low
 from .l3_regime import efficiency_ratio
+from .l5_position_sizing import risk_based_size
 from .l6_risk import CircuitBreakerMixin
 
 
@@ -22,6 +23,8 @@ class ConfluenceStrategy(CircuitBreakerMixin, Strategy):
     swing_lookback = 20
     atr_sl_mult = 1.5
     atr_tp_mult = 2.5
+    risk_pct = 0.01   # Layer 5: risk 1% of equity per trade, sized off SL distance
+    leverage = 30      # must match Backtest(..., margin=1/leverage) - see backtest_harness
     # max_consecutive_losses / cooldown_bars: inherited from
     # CircuitBreakerMixin (Layer 6). Override here per-strategy if needed.
 
@@ -79,12 +82,14 @@ class ConfluenceStrategy(CircuitBreakerMixin, Strategy):
                     sl = price - self.atr_sl_mult * atr
                     tp = price + self.atr_tp_mult * atr
                     if sl < price:
-                        self.buy(sl=sl, tp=tp, size=0.1)
+                        size = risk_based_size(price, sl, self.risk_pct, self.leverage)
+                        self.buy(sl=sl, tp=tp, size=size)
                 elif short_signal:
                     sl = price + self.atr_sl_mult * atr
                     tp = price - self.atr_tp_mult * atr
                     if sl > price:
-                        self.sell(sl=sl, tp=tp, size=0.1)
+                        size = risk_based_size(price, sl, self.risk_pct, self.leverage)
+                        self.sell(sl=sl, tp=tp, size=size)
         else:
             if self.position.is_long and price < self.ema_21[-1] and not macro_uptrend:
                 self.position.close()

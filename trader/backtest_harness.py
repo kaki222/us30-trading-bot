@@ -4,6 +4,15 @@ backtest_harness.py — walk-forward validation harness
 Anchored walk-forward: train window grows from a fixed start, test
 window rolls forward. Reused across every instrument and every
 signal-model version so results stay comparable.
+
+Default cash is 100_000, not 25_000: backtesting.py only trades whole
+units (no fractional contracts), and Layer 5's risk-based sizing
+computes `units = floor(cash * risk_pct / sl_distance)` - independent
+of price and leverage. At $25k cash with 1% risk, any US30 setup with a
+stop wider than ~$250 silently floored to 0 units (the trade just never
+executes, no error) once US30's price grew past the account size -
+LiquiditySweepStrategy's wider structural stops lost 74% of its trades
+to this before the fix. $100k clears it for the full 2016-2026 range.
 """
 
 import pandas as pd
@@ -39,26 +48,30 @@ REGIME_OPTIMIZE_KWARGS = dict(
 )
 
 
-def run_fold(df, train_start, train_end, test_end, cash=25_000, verbose=True,
+def run_fold(df, train_start, train_end, test_end, cash=100_000, verbose=True,
              strategy_cls=RegimeConfluenceStrategy, optimize_kwargs=REGIME_OPTIMIZE_KWARGS):
     if verbose:
         print(f"Fold: train [{train_start.date()} -> {train_end.date()}]  test [{train_end.date()} -> {test_end.date()}]")
 
     test_slice = df.loc[train_end:test_end]
+    # margin derived from the strategy's own `leverage` class attribute
+    # (Layer 5, l5_position_sizing.risk_based_size) rather than a second
+    # hardcoded constant here - the two can no longer silently drift apart.
+    margin = 1 / strategy_cls.leverage
 
     if optimize_kwargs is None:
         # No per-fold search - just the strategy's own fixed defaults, out-of-sample.
-        bt_test = Backtest(test_slice, strategy_cls, cash=cash, commission=0.0002, margin=1/30, finalize_trades=True)
+        bt_test = Backtest(test_slice, strategy_cls, cash=cash, commission=0.0002, margin=margin, finalize_trades=True)
         test_stats = bt_test.run()
         params = {}
     else:
         train_slice = df.loc[train_start:train_end]
-        bt_train = Backtest(train_slice, strategy_cls, cash=cash, commission=0.0002, margin=1/30, finalize_trades=True)
+        bt_train = Backtest(train_slice, strategy_cls, cash=cash, commission=0.0002, margin=margin, finalize_trades=True)
         opt_stats = bt_train.optimize(**optimize_kwargs)
         param_names = [k for k in optimize_kwargs if k not in ("maximize", "constraint")]
         params = {k: getattr(opt_stats._strategy, k) for k in param_names}
 
-        bt_test = Backtest(test_slice, strategy_cls, cash=cash, commission=0.0002, margin=1/30, finalize_trades=True)
+        bt_test = Backtest(test_slice, strategy_cls, cash=cash, commission=0.0002, margin=margin, finalize_trades=True)
         test_stats = bt_test.run(**params)
 
     if verbose:
@@ -67,7 +80,7 @@ def run_fold(df, train_start, train_end, test_end, cash=25_000, verbose=True,
     return params, test_stats
 
 
-def walk_forward(df, cash=25_000, initial_train_months=12, test_months=3, verbose=True,
+def walk_forward(df, cash=100_000, initial_train_months=12, test_months=3, verbose=True,
                   strategy_cls=RegimeConfluenceStrategy, optimize_kwargs=REGIME_OPTIMIZE_KWARGS):
     data_start = df.index[0]
     data_end = df.index[-1]
