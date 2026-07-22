@@ -124,10 +124,20 @@ def resolve_symbol(candidates: list[str]) -> str:
 
 
 # Fill these in yourself after running resolve_symbol() or checking
-# Market Watch directly — XM's exact names weren't guessable from here.
+# Market Watch directly — symbol names are broker-specific, so these
+# must be re-confirmed for whichever account is actually in use.
+#
+# Values below ("US30"/"XAUUSD") came from smoke_test.py run against
+# the MetaQuotes-Demo TEST account (109989358) on 2026-07-22 — that's
+# a different broker/server than the real XM account (330507861).
+# XM's real symbol names are still unconfirmed (the desktop terminal's
+# Market Watch tab showed "US30Cash" as a chart name, which is a
+# strong hint, but hasn't been verified with resolve_symbol() against
+# that account) — do not assume these values carry over to XM without
+# re-running the smoke test against the XM terminal specifically.
 SYMBOL_MAP = {
-    "US30": None,   # e.g. "US30Cash" — confirm in MT5 Market Watch
-    "GOLD": None,   # e.g. "XAUUSD" — confirm in MT5 Market Watch
+    "US30": "US30",     # confirmed on MetaQuotes-Demo test account only
+    "GOLD": "XAUUSD",   # confirmed on MetaQuotes-Demo test account only
 }
 
 

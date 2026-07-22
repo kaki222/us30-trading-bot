@@ -3,6 +3,16 @@ smoke_test.py — run this FIRST, before anything else in l7_execution,
 on the Windows machine with MT5 installed and a demo account logged in.
 
     py -m trader.l7_execution.smoke_test
+    py -m trader.l7_execution.smoke_test "C:\\Program Files\\MetaTrader 5\\terminal64.exe"
+
+If you have more than one MT5 terminal installed (e.g. a broker-branded
+one for a real account, plus a separate generic one for testing), pass
+the exact path to the terminal you want THIS script to attach to as an
+argument - mt5.initialize() with no path is ambiguous when multiple
+terminals are installed, and attaching to the wrong one is exactly the
+kind of mistake this script exists to avoid. Find the right path by
+right-clicking that terminal's taskbar/desktop icon -> "Open file
+location" and copying the full path to terminal64.exe from there.
 
 It does nothing but read: connect, print account info, list symbols
 that look like US30/Gold, pull 5 bars, disconnect. No orders are
@@ -10,12 +20,20 @@ placed. If any step here fails or prints something unexpected, stop —
 don't move on to place_trade() until this passes cleanly.
 """
 
+import sys
+
 from . import connect, shutdown, account_summary, resolve_symbol, get_live_bars
 
 
 def main():
-    print("Connecting to MT5 terminal...")
-    connect()
+    path = sys.argv[1] if len(sys.argv) > 1 else None
+    if path:
+        print(f"Connecting to MT5 terminal at: {path}")
+    else:
+        print("Connecting to MT5 terminal (no path given - attaching to "
+              "whichever terminal MT5 finds by default; pass an explicit "
+              "path if you have more than one installed)...")
+    connect(path=path)
     print("Connected.\n")
 
     print("Account summary:")

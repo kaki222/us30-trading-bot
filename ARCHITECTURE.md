@@ -178,26 +178,51 @@ all three strategies × both instruments.
 
 Windows-only, since it wraps the `MetaTrader5` Python package (COM/DLL
 interop with a running MT5 terminal — doesn't exist on Linux/Mac).
-Written and reasoned through against the documented MT5 API in the same
-Linux sandbox everything else in this doc was built in, which means
-**none of it has actually been executed against a real terminal.**
-That's a materially different confidence level than every other layer
-in this file, which were all run and their numbers verified. Don't
-treat this section as "done" the way Layers 1–6 are — treat it as a
-draft to smoke-test.
+Originally written and reasoned through against the documented MT5 API
+in the Linux sandbox everything else in this doc was built in, with no
+way to execute it there.
+
+**Update 2026-07-22: the read path is now verified against a real
+terminal, not just a mock.** `connect()`, `account_summary()`,
+`resolve_symbol()`, and `get_live_bars()` were all run via
+`smoke_test.py` against a real MT5 desktop terminal (generic
+MetaQuotes build, not XM's) logged into a throwaway MetaQuotes-Demo
+account (109989358) — connected successfully, printed real account
+info, resolved `"US30"` and `"XAUUSD"` as that account's actual symbol
+names, and pulled 5 real live H4 bars for each. That's a materially
+higher confidence level than "mock-tested" for those four functions
+specifically.
+
+**Still unverified against a real terminal:** `build_live_features()`
+beyond the raw bar pull, `evaluate_regime_confluence_signal()`,
+`size_fraction_to_lots()`, `place_trade()` (dry-run or real),
+`LiveCircuitBreaker`, and `run_once()`. None of those have been
+exercised outside the mock. The test account above is fully
+consequence-free (fake $5,000,000, isolated MetaQuotes demo server, no
+connection to anything real) — it's the right place to verify those
+next, including a real `dry_run=False` order, before this ever goes
+near XM.
 
 - `connect()` / `shutdown()` / `account_summary()` — attach to an
-  already-running, already-logged-in MT5 terminal.
+  already-running, already-logged-in MT5 terminal. **Verified working.**
 - `resolve_symbol(candidates)` — XM's exact instrument names for US30
-  and Gold weren't guessable from here (brokers vary: `"US30Cash"`,
-  `"US30.cash"`, `"XAUUSD"`, `"GOLDm"`, etc.). This searches the
-  account's actual Market Watch instead of hardcoding a guess. Results
-  go in `SYMBOL_MAP`, which starts as `{"US30": None, "GOLD": None}` —
-  must be filled in on the Windows side before anything else runs.
+  and Gold still aren't confirmed (brokers vary: `"US30Cash"`,
+  `"US30.cash"`, `"XAUUSD"`, `"GOLDm"`, etc. — the XM desktop terminal's
+  Market Watch tab shows `"US30Cash"` as a hint, but that hasn't been
+  run through `resolve_symbol()` against that account yet). This
+  searches the account's actual Market Watch instead of hardcoding a
+  guess. `SYMBOL_MAP` currently holds `{"US30": "US30", "GOLD":
+  "XAUUSD"}` — **but those values are confirmed only for the
+  MetaQuotes-Demo test account (109989358), not XM.** Don't assume
+  they carry over; re-run `resolve_symbol()` against the XM terminal
+  before pointing anything at account 330507861.
 - `get_live_bars()` / `build_live_features()` — pull live H4 bars and
   run them through the *same* `l2_features`/`l3_regime` functions used
   in backtesting, so live features are computed identically to backtest
-  features. This part reuses real, tested code — lower risk than the
+  features. `get_live_bars()` itself is **verified** (real 5-bar pull
+  succeeded for both symbols above); the indicator-attaching part of
+  `build_live_features()` still isn't. This part reuses real, tested
+  code — lower risk than the
   rest of this layer.
 - `evaluate_regime_confluence_signal()` — a **hand-port** of
   `RegimeConfluenceStrategy.next()`'s entry rules from
