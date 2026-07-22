@@ -13,6 +13,7 @@ import numpy as np
 from backtesting import Strategy
 
 from .l2_features import swing_high, swing_low
+from .l3_regime import efficiency_ratio
 
 
 class ConfluenceStrategy(Strategy):
@@ -40,6 +41,13 @@ class ConfluenceStrategy(Strategy):
         self._consecutive_losses = 0
         self._cooldown_until_bar = -1
 
+    def _regime_ok(self) -> bool:
+        """Layer 3 gate: is this a tradeable trend? Base version = bare ADX threshold."""
+        return self.adx_14[-1] > self.adx_threshold
+
+    def _regime_warmed_up(self) -> bool:
+        return not np.isnan(self.adx_14[-1])
+
     def next(self):
         # --- Layer 6 (risk overlay: circuit breaker), temporarily inline ---
         closed = self.closed_trades
@@ -58,11 +66,11 @@ class ConfluenceStrategy(Strategy):
 
         price = self.data.Close[-1]
         atr = self.atr_14[-1]
-        if np.isnan(atr) or np.isnan(self.ma_360[-1]) or np.isnan(self.adx_14[-1]) or np.isnan(self.swing_hi[-1]):
+        if np.isnan(atr) or np.isnan(self.ma_360[-1]) or np.isnan(self.swing_hi[-1]) or not self._regime_warmed_up():
             return
 
-        # --- Layer 3 (regime), currently just an ADX threshold ---
-        trending = self.adx_14[-1] > self.adx_threshold
+        # --- Layer 3 (regime) ---
+        trending = self._regime_ok()
 
         # --- Layer 4 (signal), currently hand-picked rules ---
         ema_bullish = self.ema_8[-1] > self.ema_21[-1]
@@ -94,3 +102,31 @@ class ConfluenceStrategy(Strategy):
                 self.position.close()
             elif self.position.is_short and price > self.ema_21[-1] and not macro_downtrend:
                 self.position.close()
+
+
+class RegimeConfluenceStrategy(ConfluenceStrategy):
+    """
+    Identical Layer 4 signal rules to ConfluenceStrategy. The only change
+    is the Layer 3 gate: instead of a bare ADX threshold, "trending" is
+    decided by l3_regime's Kaufman Efficiency Ratio (backward-looking,
+    range ~[0,1], 1 = clean directional move, 0 = pure chop).
+
+    This is the swap the module docstring above has been flagging since
+    Layer 3 was split out - the walk-forward optimizer kept picking the
+    loosest available adx_threshold (15) in 19/36 US30 folds, which is
+    the regime filter barely filtering anything. ER is a more direct
+    measure of "is price actually going somewhere" than ADX.
+    """
+    er_length = 20
+    er_threshold = 0.35
+
+    def init(self):
+        super().init()
+        d = self.data.df
+        self.er = self.I(lambda: efficiency_ratio(d["Close"], self.er_length), name=f"ER{self.er_length}")
+
+    def _regime_ok(self) -> bool:
+        return self.er[-1] > self.er_threshold
+
+    def _regime_warmed_up(self) -> bool:
+        return not np.isnan(self.er[-1])

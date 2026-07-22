@@ -9,10 +9,28 @@ signal-model version so results stay comparable.
 import pandas as pd
 from backtesting import Backtest
 
-from .l4_signal_model import ConfluenceStrategy
+from .l4_signal_model import ConfluenceStrategy, RegimeConfluenceStrategy
 
-DEFAULT_OPTIMIZE_KWARGS = dict(
+# ADX-gated grid. Kept for explicit opt-in / comparison runs
+# (pass strategy_cls=ConfluenceStrategy, optimize_kwargs=ADX_OPTIMIZE_KWARGS).
+# No longer the default: walk-forward showed the ER gate beating it on
+# both US30 (every metric) and Gold (higher return, worse drawdown) - see
+# reports/*_adx_vs_er_comparison.png.
+ADX_OPTIMIZE_KWARGS = dict(
     adx_threshold=range(15, 31, 5),
+    swing_lookback=range(10, 41, 10),
+    atr_sl_mult=[1.5, 2.0, 2.5],
+    atr_tp_mult=[1.5, 2.0, 2.5, 3.0, 3.5, 4.0],
+    maximize="SQN",
+    constraint=lambda p: p.atr_tp_mult > p.atr_sl_mult,
+)
+DEFAULT_OPTIMIZE_KWARGS = ADX_OPTIMIZE_KWARGS  # back-compat alias, don't use for new code
+
+# Same grid as ADX_OPTIMIZE_KWARGS but with adx_threshold swapped for
+# er_threshold, for use with RegimeConfluenceStrategy - this is now the
+# default (see run_fold/walk_forward below).
+REGIME_OPTIMIZE_KWARGS = dict(
+    er_threshold=[0.25, 0.35, 0.45, 0.55],
     swing_lookback=range(10, 41, 10),
     atr_sl_mult=[1.5, 2.0, 2.5],
     atr_tp_mult=[1.5, 2.0, 2.5, 3.0, 3.5, 4.0],
@@ -22,7 +40,7 @@ DEFAULT_OPTIMIZE_KWARGS = dict(
 
 
 def run_fold(df, train_start, train_end, test_end, cash=25_000, verbose=True,
-             strategy_cls=ConfluenceStrategy, optimize_kwargs=DEFAULT_OPTIMIZE_KWARGS):
+             strategy_cls=RegimeConfluenceStrategy, optimize_kwargs=REGIME_OPTIMIZE_KWARGS):
     if verbose:
         print(f"Fold: train [{train_start.date()} -> {train_end.date()}]  test [{train_end.date()} -> {test_end.date()}]")
 
@@ -50,7 +68,7 @@ def run_fold(df, train_start, train_end, test_end, cash=25_000, verbose=True,
 
 
 def walk_forward(df, cash=25_000, initial_train_months=12, test_months=3, verbose=True,
-                  strategy_cls=ConfluenceStrategy, optimize_kwargs=DEFAULT_OPTIMIZE_KWARGS):
+                  strategy_cls=RegimeConfluenceStrategy, optimize_kwargs=REGIME_OPTIMIZE_KWARGS):
     data_start = df.index[0]
     data_end = df.index[-1]
     train_end = data_start + pd.DateOffset(months=initial_train_months)
