@@ -80,17 +80,32 @@ Two independent strategy families, both rule-based (the docstring's
 - `RegimeConfluenceStrategy(ConfluenceStrategy)` — same signal rules,
   overrides `_regime_ok()` to use Layer 3's `efficiency_ratio` instead.
   **This is now the default** in `backtest_harness.run_fold`/
-  `walk_forward` (commit `ee6a36b`). Walk-forward result vs the ADX
-  version, full MT5 history:
-  - US30 (36 folds, 2016–2026): total return −13.7% → **+55.8%**, max
-    drawdown 39.8% → **18.6%**, fold win rate 50% → 55.6%. Clean
-    improvement on every axis.
-  - Gold (48 folds, 2014–2026): total return 49.5% → **+87.5%**, but max
-    drawdown also grew 57.6% → **65.0%**. More return for more risk, not
-    a free upgrade — most of the gain is concentrated in the last two
-    folds during the current gold rally.
-  - Full fold-by-fold data: `reports/walk_forward_*_regime_er.csv` and
-    `reports/*_adx_vs_er_comparison.png`.
+  `walk_forward` (commit `ee6a36b`).
+  - ER gate vs ADX gate, both on the OLD fixed-size=0.1 sizing at $25k
+    cash (`reports/*_adx_vs_er_comparison.png`): US30 (36 folds,
+    2016–2026) total return −13.7% → +55.8%, max drawdown 39.8% →
+    18.6%, fold win rate 50% → 55.6% — clean improvement on every axis
+    (the ADX filter was barely filtering; optimizer picked the loosest
+    available threshold in 19/36 folds). Gold (48 folds, 2014–2026)
+    total return 49.5% → +87.5%, but max drawdown also grew 57.6% →
+    65.0% — more return for more risk, not a free upgrade.
+  - **Superseded by the Layer 5 sizing re-run below** — those numbers
+    ran on the old uncontrolled fixed-size sizing (see Layer 5). Same
+    ER-gated `RegimeConfluenceStrategy`, re-run on $100k cash + 1%-risk
+    sizing (`reports/walk_forward_*_sized.csv`,
+    `reports/walk_forward_sized_equity_curves.png`):
+    - US30 (36 folds): total return **+24.7%**, max drawdown **8.2%**
+      (was 18.6%), fold win rate **61.1%** (was 55.6%), 251 trades.
+      Return/drawdown ratio ~3.0x, basically unchanged — the smaller
+      total-return number buys a much safer ride.
+    - Gold (48 folds): total return **+28.7%**, max drawdown **17.9%**
+      (was 65.0% — a >3.6x improvement), fold win rate **52.1%** (was
+      47.9%), 235 trades. Return/drawdown ratio improved 1.35x → 1.60x.
+    - Takeaway: the earlier "ER beats ADX" total-return numbers were
+      partly an artifact of sizing that would have been genuinely
+      dangerous to trade live (see the whole-unit-flooring bug under
+      Layer 5). Properly risk-sized, the ER gate still wins — just a
+      more modest, more honest win.
 - `ADX_OPTIMIZE_KWARGS` / `REGIME_OPTIMIZE_KWARGS` in `backtest_harness.py`
   — param grids for each variant. `DEFAULT_OPTIMIZE_KWARGS` is a
   back-compat alias for `ADX_OPTIMIZE_KWARGS`; don't use it in new code.
@@ -175,7 +190,7 @@ from trader.l2_features import build_bt_df
 from trader.backtest_harness import walk_forward  # defaults to RegimeConfluenceStrategy now
 
 df = build_bt_df("US30")   # or "GOLD"
-folds = walk_forward(df, cash=25_000)
+folds = walk_forward(df)   # cash defaults to 100_000 - see Layer 5
 ```
 
 Walk-forward over full history is slow (grid-search re-optimized every
