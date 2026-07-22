@@ -1,0 +1,399 @@
+"""
+l7_execution — Layer 7: Execution (MT5 live/demo)
+
+Windows-only. Requires:
+  - a running MT5 terminal, already logged into an account (start with
+    a DEMO account, not live) at your broker (XM or otherwise) — this
+    module talks to that running terminal, it does not launch one
+  - `pip install MetaTrader5` (a Windows-only package — it will not
+    import in this project's Linux dev sandbox; see ARCHITECTURE.md)
+
+Honesty note: nothing in this file has been executed. It was written
+against the documented MetaTrader5 Python API, not run against a live
+terminal, because no MT5 terminal is reachable from the environment
+this was written in. Run `python -m trader.l7_execution.smoke_test`
+yourself before trusting any of this with even a demo account — see
+that file and ARCHITECTURE.md's Layer 7 section for the exact steps.
+
+Design: rather than re-deriving signals from scratch, this bridges live
+MT5 bars into the *same* Layer 2/3 feature functions used in
+backtesting (l2_features.sma/ema/macd/atr/adx, l3_regime.efficiency_ratio),
+so live features are computed identically to backtest features. The
+entry RULES themselves (long_signal/short_signal) are a hand-port of
+RegimeConfluenceStrategy.next() in l4_signal_model.py — backtesting.py's
+Strategy class is a backtest-loop construct and can't be driven live
+directly, so this is a second copy of that logic, not a shared one. If
+you change the rules in l4_signal_model.py, update
+evaluate_regime_confluence_signal() here too — they will silently drift
+apart otherwise. That duplication is the main structural weak point of
+this file; collapsing it into one shared rule definition is the
+natural next step once this has been smoke-tested.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+import numpy as np
+import pandas as pd
+
+try:
+    import MetaTrader5 as mt5
+except ImportError:
+    mt5 = None  # lets this module be imported/read on Linux; connect() raises clearly below
+
+from ..l2_features import sma, ema, macd, atr, adx
+from ..l3_regime import efficiency_ratio
+from ..l5_position_sizing import risk_based_size
+
+# ---------------------------------------------------------------------
+# Connection
+# ---------------------------------------------------------------------
+
+def connect(login: int | None = None, password: str | None = None,
+            server: str | None = None, path: str | None = None) -> bool:
+    """
+    Attach to an already-running MT5 terminal. If the terminal is already
+    logged in manually, you can call connect() with no arguments — MT5
+    will attach to that session. Only pass login/password/server if you
+    want this script to log in itself (avoid hardcoding real credentials
+    in source; read them from an environment variable or a local
+    untracked file instead).
+    """
+    if mt5 is None:
+        raise RuntimeError(
+            "MetaTrader5 package not installed or not on Windows. "
+            "Run `pip install MetaTrader5` on the Windows machine with "
+            "the MT5 terminal — this package does not work on Linux/Mac."
+        )
+    kwargs = {}
+    if path:
+        kwargs["path"] = path
+    if login and password and server:
+        kwargs.update(login=int(login), password=password, server=server)
+    ok = mt5.initialize(**kwargs)
+    if not ok:
+        raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
+    return True
+
+
+def shutdown():
+    if mt5 is not None:
+        mt5.shutdown()
+
+
+def account_summary() -> dict:
+    info = mt5.account_info()
+    if info is None:
+        raise RuntimeError(f"account_info() failed: {mt5.last_error()}")
+    return {
+        "login": info.login,
+        "server": info.server,
+        "balance": info.balance,
+        "equity": info.equity,
+        "margin": info.margin,
+        "margin_free": info.margin_free,
+        "leverage": info.leverage,
+        "currency": info.currency,
+    }
+
+
+def resolve_symbol(candidates: list[str]) -> str:
+    """
+    Brokers name instruments differently (e.g. "US30", "US30Cash",
+    "US30.cash", "XAUUSD", "GOLD", "GOLDm"). I don't know XM's exact
+    naming and won't guess — pass a few likely candidates and this
+    returns whichever one actually exists in your Market Watch. If none
+    match, it raises and prints every symbol MT5 knows about containing
+    a hint from your candidates, so you can find the real name and hardcode
+    it in SYMBOL_MAP below.
+    """
+    all_symbols = {s.name for s in mt5.symbols_get()}
+    for c in candidates:
+        if c in all_symbols:
+            return c
+    hint = candidates[0][:3].lower()
+    close_matches = sorted(s for s in all_symbols if hint in s.lower())
+    raise ValueError(
+        f"None of {candidates} found in this account's Market Watch. "
+        f"Symbols containing {hint!r}: {close_matches or '(none)'}. "
+        f"Open Market Watch in MT5, find the real symbol name, and add "
+        f"it to SYMBOL_MAP below."
+    )
+
+
+# Fill these in yourself after running resolve_symbol() or checking
+# Market Watch directly — XM's exact names weren't guessable from here.
+SYMBOL_MAP = {
+    "US30": None,   # e.g. "US30Cash" — confirm in MT5 Market Watch
+    "GOLD": None,   # e.g. "XAUUSD" — confirm in MT5 Market Watch
+}
+
+
+# ---------------------------------------------------------------------
+# Live data -> same feature pipeline as backtesting (l2_features, l3_regime)
+# ---------------------------------------------------------------------
+
+def get_live_bars(symbol: str, timeframe=None, count: int = 800) -> pd.DataFrame:
+    """
+    Pull the most recent `count` H4 bars for `symbol` from the running
+    terminal, shaped exactly like l1_data.load_h4()'s output (lowercase
+    OHLCV, index named "time") so it's a drop-in feed into the same
+    feature functions build_bt_df() uses for backtesting.
+    """
+    tf = timeframe if timeframe is not None else mt5.TIMEFRAME_H4
+    rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
+    if rates is None or len(rates) == 0:
+        raise RuntimeError(f"copy_rates_from_pos({symbol}) returned nothing: {mt5.last_error()}")
+    df = pd.DataFrame(rates)
+    df["time"] = pd.to_datetime(df["time"], unit="s")
+    df = df.set_index("time")
+    df = df.rename(columns={"tick_volume": "volume"})[["open", "high", "low", "close", "volume"]]
+    return df
+
+
+def build_live_features(symbol: str, er_length: int = 20, count: int = 800) -> pd.DataFrame:
+    """Live equivalent of l2_features.build_bt_df() + the ER column RegimeConfluenceStrategy adds."""
+    d = get_live_bars(symbol, count=count)
+    d["ma_360"] = sma(d["close"], 360)
+    d["ma_200"] = sma(d["close"], 200)
+    d["ema_21"] = ema(d["close"], 21)
+    d["ema_8"] = ema(d["close"], 8)
+    d["macd"], d["macd_signal"], d["macd_hist"] = macd(d["close"])
+    d["atr_14"] = atr(d["high"], d["low"], d["close"])
+    _, _, d["adx_14"] = adx(d["high"], d["low"], d["close"])
+    d["er"] = efficiency_ratio(d["close"], er_length)
+    return d.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"})
+
+
+# swing_high/swing_low need a lookback window matching the strategy's
+# swing_lookback param — computed inline here rather than imported,
+# since the value depends on the optimized param from the last
+# walk-forward fold (see run_once()'s params argument).
+def _swing_high(high: pd.Series, n: int) -> pd.Series:
+    return high.rolling(n).max().shift(1)
+
+
+def _swing_low(low: pd.Series, n: int) -> pd.Series:
+    return low.rolling(n).min().shift(1)
+
+
+def evaluate_regime_confluence_signal(df: pd.DataFrame, er_threshold: float = 0.35,
+                                       swing_lookback: int = 20, atr_sl_mult: float = 1.5,
+                                       atr_tp_mult: float = 2.5) -> dict:
+    """
+    Hand-port of RegimeConfluenceStrategy.next()'s entry logic
+    (l4_signal_model.py) evaluated on the LAST closed bar of `df`
+    (from build_live_features()). Returns
+    {"signal": "long"|"short"|None, "price", "sl", "tp"}.
+
+    Only entry logic is ported — exit logic (EMA21 cross with trend
+    loss) and circuit-breaker gating are handled separately in
+    run_once(), since they need live position/trade-history state this
+    function doesn't have.
+    """
+    swing_hi = _swing_high(df["High"], swing_lookback)
+    swing_lo = _swing_low(df["Low"], swing_lookback)
+
+    row = df.iloc[-1]
+    atr_val = row["atr_14"]
+    if pd.isna(atr_val) or pd.isna(row["ma_360"]) or pd.isna(swing_hi.iloc[-1]) or pd.isna(row["er"]):
+        return {"signal": None}
+
+    trending = row["er"] > er_threshold
+    ema_bullish = row["ema_8"] > row["ema_21"]
+    ema_bearish = row["ema_8"] < row["ema_21"]
+    macd_bull = row["macd_hist"] > 0
+    macd_bear = row["macd_hist"] < 0
+    price = row["Close"]
+    bos_up = price > swing_hi.iloc[-1]
+    bos_down = price < swing_lo.iloc[-1]
+    macro_uptrend = price > row["ma_360"] and price > row["ma_200"]
+    macro_downtrend = price < row["ma_360"] and price < row["ma_200"]
+
+    long_signal = trending and macro_uptrend and ema_bullish and macd_bull and bos_up
+    short_signal = trending and macro_downtrend and ema_bearish and macd_bear and bos_down
+
+    if long_signal:
+        sl = price - atr_sl_mult * atr_val
+        tp = price + atr_tp_mult * atr_val
+        return {"signal": "long", "price": price, "sl": sl, "tp": tp}
+    if short_signal:
+        sl = price + atr_sl_mult * atr_val
+        tp = price - atr_tp_mult * atr_val
+        return {"signal": "short", "price": price, "sl": sl, "tp": tp}
+    return {"signal": None}
+
+
+# ---------------------------------------------------------------------
+# Layer 6 (circuit breaker), live version
+# ---------------------------------------------------------------------
+
+@dataclass
+class LiveCircuitBreaker:
+    """
+    Same policy as l6_risk.CircuitBreakerMixin (N losses in a row ->
+    cooldown), but sourced from MT5's own deal history for this
+    symbol+magic number instead of backtesting.py's self.closed_trades,
+    since there's no backtest engine live to track that for us.
+    """
+    symbol: str
+    magic: int
+    max_consecutive_losses: int = 3
+    cooldown_bars: int = 20
+    bar_seconds: int = 4 * 3600  # H4
+
+    def in_cooldown(self) -> bool:
+        deals = mt5.history_deals_get(
+            datetime.now(timezone.utc).replace(year=datetime.now().year - 1),
+            datetime.now(timezone.utc),
+            group=f"*{self.symbol}*",
+        )
+        if not deals:
+            return False
+        closes = sorted(
+            [d for d in deals if d.magic == self.magic and d.entry == 1],  # entry=1 -> DEAL_ENTRY_OUT (closes a position)
+            key=lambda d: d.time,
+        )
+        if not closes:
+            return False
+
+        consecutive = 0
+        for d in reversed(closes):
+            if d.profit < 0:
+                consecutive += 1
+            else:
+                break
+
+        if consecutive < self.max_consecutive_losses:
+            return False
+
+        last_close_time = datetime.fromtimestamp(closes[-1].time, tz=timezone.utc)
+        cooldown_until = last_close_time.timestamp() + self.cooldown_bars * self.bar_seconds
+        return datetime.now(timezone.utc).timestamp() < cooldown_until
+
+
+# ---------------------------------------------------------------------
+# Sizing: backtesting.py's size fraction -> real MT5 lot volume
+# ---------------------------------------------------------------------
+
+def size_fraction_to_lots(symbol: str, size_fraction: float, price: float, leverage: float) -> float:
+    """
+    l5_position_sizing.risk_based_size() returns a (0, 1] fraction of
+    equity, matching backtesting.py's Strategy.buy(size=...) semantics.
+    MT5 orders need an actual lot volume instead. Converts using the
+    same relationship backtesting.py uses internally
+    (units = equity * size * leverage / price), then divides by the
+    symbol's contract size to get lots, and rounds/clamps to what the
+    broker actually allows (volume_step, volume_min, volume_max).
+    """
+    acc = mt5.account_info()
+    sym = mt5.symbol_info(symbol)
+    if acc is None or sym is None:
+        raise RuntimeError(f"Missing account_info/symbol_info for {symbol}: {mt5.last_error()}")
+
+    units = acc.equity * size_fraction * leverage / price
+    lots = units / sym.trade_contract_size
+
+    step = sym.volume_step
+    lots = round(lots / step) * step
+    lots = max(sym.volume_min, min(sym.volume_max, lots))
+    return round(lots, 2)
+
+
+# ---------------------------------------------------------------------
+# Order placement
+# ---------------------------------------------------------------------
+
+def place_trade(symbol: str, direction: str, sl: float, tp: float, risk_pct: float,
+                 leverage: float, magic: int, comment: str = "l4_regime_confluence",
+                 dry_run: bool = True) -> dict:
+    """
+    direction: "long" or "short". Computes lot size via l5's
+    risk_based_size() + size_fraction_to_lots(), then submits a market
+    order with SL/TP attached.
+
+    dry_run=True by default (deliberately) — it computes and returns
+    everything it WOULD send without calling mt5.order_send(). Flip to
+    False only after you've read back what a dry run prints and it
+    looks right, on a DEMO account.
+    """
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        raise RuntimeError(f"symbol_info_tick({symbol}) failed: {mt5.last_error()}")
+    price = tick.ask if direction == "long" else tick.bid
+
+    size_fraction = risk_based_size(price, sl, risk_pct, leverage)
+    lots = size_fraction_to_lots(symbol, size_fraction, price, leverage)
+
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": lots,
+        "type": mt5.ORDER_TYPE_BUY if direction == "long" else mt5.ORDER_TYPE_SELL,
+        "price": price,
+        "sl": sl,
+        "tp": tp,
+        "deviation": 20,
+        "magic": magic,
+        "comment": comment,
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+
+    if dry_run:
+        return {"dry_run": True, "would_send": request, "size_fraction": size_fraction, "lots": lots}
+
+    result = mt5.order_send(request)
+    return {"dry_run": False, "request": request, "result": result}
+
+
+# ---------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------
+
+def has_open_position(symbol: str, magic: int) -> bool:
+    positions = mt5.positions_get(symbol=symbol)
+    if positions is None:
+        return False
+    return any(p.magic == magic for p in positions)
+
+
+def run_once(symbol_key: str, params: dict, risk_pct: float = 0.01, leverage: float = 30,
+             magic: int = 100001, dry_run: bool = True) -> dict:
+    """
+    One polling cycle: fetch live bars -> compute features -> evaluate
+    RegimeConfluenceStrategy's entry rule -> check circuit breaker and
+    existing position -> place (or dry-run print) a trade if everything
+    clears. `params` are the optimized values from the latest
+    walk-forward fold (er_threshold, swing_lookback, atr_sl_mult,
+    atr_tp_mult) — see ARCHITECTURE.md for how to get current ones.
+    """
+    symbol = SYMBOL_MAP.get(symbol_key)
+    if not symbol:
+        raise ValueError(f"SYMBOL_MAP[{symbol_key!r}] is not set — run resolve_symbol() first.")
+
+    if has_open_position(symbol, magic):
+        return {"action": "skip", "reason": "position already open"}
+
+    breaker = LiveCircuitBreaker(symbol=symbol, magic=magic)
+    if breaker.in_cooldown():
+        return {"action": "skip", "reason": "circuit breaker cooldown"}
+
+    df = build_live_features(symbol, er_length=params.get("er_length", 20))
+    signal = evaluate_regime_confluence_signal(
+        df,
+        er_threshold=params.get("er_threshold", 0.35),
+        swing_lookback=params.get("swing_lookback", 20),
+        atr_sl_mult=params.get("atr_sl_mult", 1.5),
+        atr_tp_mult=params.get("atr_tp_mult", 2.5),
+    )
+    if signal["signal"] is None:
+        return {"action": "skip", "reason": "no signal"}
+
+    trade = place_trade(
+        symbol, signal["signal"], signal["sl"], signal["tp"],
+        risk_pct=risk_pct, leverage=leverage, magic=magic, dry_run=dry_run,
+    )
+    return {"action": "trade", "signal": signal, "trade": trade}

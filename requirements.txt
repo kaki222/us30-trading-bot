@@ -1,7 +1,12 @@
 pandas
 numpy
-yfinance
 backtesting
 matplotlib
 scikit-learn
 ipykernel
+
+# Layer 7 (trader/l7_execution) needs MetaTrader5 — Windows-only, not
+# installable in this project's Linux dev sandbox, so it's deliberately
+# NOT in this file. Install it separately on the Windows machine that
+# has the MT5 terminal:
+#   pip install MetaTrader5

@@ -17,7 +17,7 @@ edited to say otherwise.
 | 4 | Signal Model | `trader/l4_signal_model.py`, `trader/l4_liquidity_strategy.py` | ✅ Rule-based, done; not yet ML |
 | 5 | Position Sizing | `trader/l5_position_sizing.py` | ✅ Risk-based, wired into all strategies |
 | 6 | Risk Overlay | `trader/l6_risk.py` | ✅ Extracted, shared by all Layer 4 strategies |
-| 7 | Execution | *(none — inferred)* | ❌ Not started |
+| 7 | Execution | `trader/l7_execution/` | ⚠️ Written, **not yet run** — needs a Windows smoke test |
 
 ---
 
@@ -174,12 +174,106 @@ Wired into all three Layer 4 strategies:
 Confirmed the breaker actually engages (not just present but inert) for
 all three strategies × both instruments.
 
-## Layer 7 — Execution *(not started)*
+## Layer 7 — Execution (`trader/l7_execution/`)
 
-No code. Maps to the standing backlog item "Draft MT5 live/demo
-execution skeleton for XM" — connecting to a running MT5 terminal and
-actually placing trades, as opposed to backtesting them. Nothing in
-`trader/` talks to a live or demo account yet.
+Windows-only, since it wraps the `MetaTrader5` Python package (COM/DLL
+interop with a running MT5 terminal — doesn't exist on Linux/Mac).
+Written and reasoned through against the documented MT5 API in the same
+Linux sandbox everything else in this doc was built in, which means
+**none of it has actually been executed against a real terminal.**
+That's a materially different confidence level than every other layer
+in this file, which were all run and their numbers verified. Don't
+treat this section as "done" the way Layers 1–6 are — treat it as a
+draft to smoke-test.
+
+- `connect()` / `shutdown()` / `account_summary()` — attach to an
+  already-running, already-logged-in MT5 terminal.
+- `resolve_symbol(candidates)` — XM's exact instrument names for US30
+  and Gold weren't guessable from here (brokers vary: `"US30Cash"`,
+  `"US30.cash"`, `"XAUUSD"`, `"GOLDm"`, etc.). This searches the
+  account's actual Market Watch instead of hardcoding a guess. Results
+  go in `SYMBOL_MAP`, which starts as `{"US30": None, "GOLD": None}` —
+  must be filled in on the Windows side before anything else runs.
+- `get_live_bars()` / `build_live_features()` — pull live H4 bars and
+  run them through the *same* `l2_features`/`l3_regime` functions used
+  in backtesting, so live features are computed identically to backtest
+  features. This part reuses real, tested code — lower risk than the
+  rest of this layer.
+- `evaluate_regime_confluence_signal()` — a **hand-port** of
+  `RegimeConfluenceStrategy.next()`'s entry rules from
+  `l4_signal_model.py`. `backtesting.py`'s `Strategy` class is a
+  backtest-loop construct and can't be driven bar-by-bar live directly,
+  so this is a second, separate copy of the same rules. **This will
+  silently drift out of sync if `l4_signal_model.py` changes and this
+  isn't updated too** — the single biggest structural weak point of
+  this layer. Collapsing both into one shared rule definition both
+  backtest and live can call is the natural next step, once this has
+  been smoke-tested at all.
+- `LiveCircuitBreaker` — same N-losses-in-a-row → cooldown policy as
+  `l6_risk.CircuitBreakerMixin`, but sourced from MT5's own deal history
+  (`mt5.history_deals_get`) instead of `backtesting.py`'s
+  `self.closed_trades`, since there's no backtest engine live to supply
+  that.
+- `size_fraction_to_lots()` — converts `l5_position_sizing`'s `(0, 1]`
+  size fraction into an actual MT5 lot volume, using the symbol's
+  contract size and rounding/clamping to the broker's `volume_step`/
+  `volume_min`/`volume_max`. This is the one piece of real, new
+  arithmetic in this layer (everything else is plumbing) — verify it
+  by hand against a couple of known prices before trusting it.
+- `place_trade()` — **defaults to `dry_run=True`**, meaning it computes
+  and returns the exact MT5 order request without calling
+  `mt5.order_send()`. Only flip to `False` after reading a dry-run
+  output and confirming it looks right, on a **demo account**.
+- `run_once()` — one full polling cycle: skip if a position is already
+  open, skip if the circuit breaker is in cooldown, else fetch → feature
+  → signal → size → (dry-run or real) trade.
+
+### Testing this yourself (I cannot do this part)
+
+On the Windows machine with the MT5 terminal, logged into an XM demo
+account:
+
+```powershell
+pip install MetaTrader5
+cd path\to\us30-trading-bot
+py -m trader.l7_execution.smoke_test
+```
+
+That script only reads — connects, prints account info, searches for
+US30/Gold's real symbol names, pulls 5 bars, disconnects. No orders.
+Fix `SYMBOL_MAP` in `trader/l7_execution/__init__.py` based on what it
+finds, re-run it to confirm bars come back, and only then try
+`run_once()` with `dry_run=True` (the default) to see what order it
+*would* place, before ever setting `dry_run=False`.
+
+### What "written, not run" actually means here
+
+Ran every pure-logic function (`get_live_bars`, `build_live_features`,
+`evaluate_regime_confluence_signal`, `size_fraction_to_lots`,
+`place_trade` dry-run, `LiveCircuitBreaker`, `run_once`) against a
+hand-built fake `MetaTrader5` module with synthetic bar data, deal
+history, and account/symbol info — catches real bugs (wrong field
+names, shape mismatches, broken imports) beyond what `py_compile`
+would. All of it ran clean; the sizing math checks out by hand too
+(1% of $100k risk / a $500.5 stop ≈ 2.0 lots, which is what
+`size_fraction_to_lots` returned). What this does **not** verify: the
+*real* MT5 API's actual field names/semantics, real broker symbol
+naming, real fill behavior, or anything about a live terminal — a
+mock only proves the code does what I intended, not that what I
+intended matches reality. The Windows smoke test is still the first
+real test.
+
+### Not done yet
+
+- No `run_loop()` bar-close scheduler wired up — `run_once()` exists,
+  calling it on a timer (aligned to H4 candle closes, not naive
+  polling) is the next piece.
+- No wiring for `LiquiditySweepStrategy` (only `RegimeConfluenceStrategy`
+  is ported) or for the un-optimized `ConfluenceStrategy` variant.
+- `LiveCircuitBreaker`'s `history_deals_get` window and grouping filter
+  are untested against real MT5 deal records — the deal object's exact
+  field names/semantics (`entry`, `magic`, `profit`) are drawn from the
+  MT5 API docs, not verified against live output.
 
 ---
 
