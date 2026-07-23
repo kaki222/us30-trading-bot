@@ -230,34 +230,65 @@ invisible to it. It would have shipped silently — the breaker would
 have looked like it worked in every check *except* the one that
 matters, catching a genuine losing streak in real time.
 
-**Still unverified:** `build_live_features()` beyond the raw bar pull,
-`evaluate_regime_confluence_signal()`, and `run_once()` end-to-end.
-Given what was just found in `in_cooldown()`, treat "written, mock-
-tested" as meaningfully weaker evidence than before for anything not
-yet run for real — worth being conservative about what's assumed solid
-until it's actually been exercised on the test account.
+**Update 2026-07-23 (later same day): full signal-generation path
+verified against XM's real live feed — and the correct XM symbol
+names are now confirmed, not guessed.**
+
+Realized partway through testing that the MetaQuotes-Demo test account
+uses a *different price feed* than XM (different liquidity providers →
+different quotes, different bar prints, a few dollars off even for the
+"same" instrument) — expected and normal across brokers, but it means
+signal *values* computed against that test account's data were never
+going to be representative of what the same code sees on XM, even
+though the mechanics were fine to prove there. `evaluate_regime_
+confluence_signal()` specifically needed testing against XM's actual
+feed to mean anything.
+
+Opened a second, real XM demo account (345899957, "XMGlobal-MT5 10" —
+same broker/server family as the real account 330507861, just a
+different demo number) via XM's own web signup, logged it into the XM
+desktop terminal (that build turned out to be single-instance — can't
+run two windows of it at once, so this meant temporarily switching the
+one XM terminal window's login rather than running two side by side;
+safe here specifically because `test_signal_readonly.py` has no
+order-sending code path at all, regardless of which account is
+connected), and ran `test_signal_readonly.py` — a strictly read-only
+script (`connect`, `resolve_symbol`, `build_live_features`,
+`evaluate_regime_confluence_signal`; no `place_trade`, no
+`order_send`) against it.
+
+Results: `resolve_symbol()` found XM's real names directly —
+**`"US30Cash"`** (confirmed exactly what the Market Watch tab label had
+hinted at, now actually verified) and **`"GOLD"`** (plain, not
+`"XAUUSD"` like the test account) — `SYMBOL_MAP` now holds these as the
+values to use for XM. Both instruments returned `{"signal": None}` on
+the live bar at test time, which checks out by hand: US30's
+efficiency ratio was 0.055 (deep chop, nowhere near the 0.35 trending
+threshold) and its EMA8/EMA21 relationship didn't match its macro
+trend either; Gold's ER was 0.30 (still under threshold) with the same
+kind of EMA/MACD-vs-macro-trend mismatch. Correct behavior, not a gap
+— confirms the rule logic is internally consistent on real current
+data, not just non-crashing.
+
+**Still unverified:** `run_once()` end-to-end (its individual pieces —
+fetch, feature, signal, size, trade — are now all proven separately,
+but the orchestration itself hasn't been run as a whole).
 
 - `connect()` / `shutdown()` / `account_summary()` — attach to an
   already-running, already-logged-in MT5 terminal. **Verified working.**
-- `resolve_symbol(candidates)` — XM's exact instrument names for US30
-  and Gold still aren't confirmed (brokers vary: `"US30Cash"`,
-  `"US30.cash"`, `"XAUUSD"`, `"GOLDm"`, etc. — the XM desktop terminal's
-  Market Watch tab shows `"US30Cash"` as a hint, but that hasn't been
-  run through `resolve_symbol()` against that account yet). This
-  searches the account's actual Market Watch instead of hardcoding a
-  guess. `SYMBOL_MAP` currently holds `{"US30": "US30", "GOLD":
-  "XAUUSD"}` — **but those values are confirmed only for the
-  MetaQuotes-Demo test account (109989358), not XM.** Don't assume
-  they carry over; re-run `resolve_symbol()` against the XM terminal
-  before pointing anything at account 330507861.
+- `resolve_symbol(candidates)` — **verified**, and XM's real symbol
+  names are now confirmed rather than guessed: `SYMBOL_MAP` holds
+  `{"US30": "US30Cash", "GOLD": "GOLD"}`, resolved directly against an
+  XM demo account (345899957, same broker/server family as the real
+  account). Different from the MetaQuotes-Demo test account's names
+  (`"US30"`/`"XAUUSD"`) — different broker, different naming; that
+  test account's values would need overriding if it's reused.
 - `get_live_bars()` / `build_live_features()` — pull live H4 bars and
   run them through the *same* `l2_features`/`l3_regime` functions used
   in backtesting, so live features are computed identically to backtest
-  features. `get_live_bars()` itself is **verified** (real 5-bar pull
-  succeeded for both symbols above); the indicator-attaching part of
-  `build_live_features()` still isn't. This part reuses real, tested
-  code — lower risk than the
-  rest of this layer.
+  features. **Both verified** — real bars and a full feature row (MA,
+  EMA, MACD, ATR, ADX, ER) were pulled and printed against XM's real
+  feed and checked by hand for internal consistency.
 - `evaluate_regime_confluence_signal()` — a **hand-port** of
   `RegimeConfluenceStrategy.next()`'s entry rules from
   `l4_signal_model.py`. `backtesting.py`'s `Strategy` class is a
@@ -265,9 +296,11 @@ until it's actually been exercised on the test account.
   so this is a second, separate copy of the same rules. **This will
   silently drift out of sync if `l4_signal_model.py` changes and this
   isn't updated too** — the single biggest structural weak point of
-  this layer. Collapsing both into one shared rule definition both
-  backtest and live can call is the natural next step, once this has
-  been smoke-tested at all.
+  this layer, still true even now that it's **verified working**
+  (correctly returned `None` on both US30 and GOLD given their real
+  live regime readings, checked by hand — see the 2026-07-23 update
+  above). Collapsing both into one shared rule definition both
+  backtest and live can call is the natural next step.
 - `LiveCircuitBreaker` — same N-losses-in-a-row → cooldown policy as
   `l6_risk.CircuitBreakerMixin`, but sourced from MT5's own deal history
   (`mt5.history_deals_get`) instead of `backtesting.py`'s
@@ -307,11 +340,18 @@ until it's actually been exercised on the test account.
   guessing at a fix.
 - `check_cooldown.py` — checks `in_cooldown()` against whatever deal
   history already exists, without opening new positions.
+- `test_signal_readonly.py` — tests the signal-generation path
+  (`build_live_features`, `evaluate_regime_confluence_signal`) against
+  whatever real feed it's pointed at. Has no `place_trade`/`order_send`
+  code path anywhere in the file — safe to point at a real account
+  (used against the XM demo, 345899957) since there's no way for it to
+  submit an order regardless of which account is connected.
 
-All five have the same safety pattern: read `account_summary()` first
-and refuse to proceed (for anything beyond read-only calls) if the
-connected login isn't the test account (109989358) — kept as a
-reusable pattern for any future Layer 7 test script.
+The five order-capable scripts share the same safety pattern: read
+`account_summary()` first and refuse to proceed if the connected login
+isn't the designated test account (109989358) — kept as a reusable
+pattern for any future Layer 7 test script that can send orders.
+`test_signal_readonly.py` doesn't need that gate, by construction.
 
 ### Testing this yourself (I cannot do this part)
 

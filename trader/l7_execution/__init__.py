@@ -127,17 +127,18 @@ def resolve_symbol(candidates: list[str]) -> str:
 # Market Watch directly — symbol names are broker-specific, so these
 # must be re-confirmed for whichever account is actually in use.
 #
-# Values below ("US30"/"XAUUSD") came from smoke_test.py run against
-# the MetaQuotes-Demo TEST account (109989358) on 2026-07-22 — that's
-# a different broker/server than the real XM account (330507861).
-# XM's real symbol names are still unconfirmed (the desktop terminal's
-# Market Watch tab showed "US30Cash" as a chart name, which is a
-# strong hint, but hasn't been verified with resolve_symbol() against
-# that account) — do not assume these values carry over to XM without
-# re-running the smoke test against the XM terminal specifically.
+# Values below are XM's REAL symbol names, confirmed 2026-07-23 via
+# resolve_symbol() run against an XM demo account (345899957, same
+# broker/server family as the real account 330507861 - "XMGlobal-MT5
+# 10" vs "XMGlobal-MT5 9") through test_signal_readonly.py (read-only,
+# no orders). These are what to use for anything eventually pointed at
+# XM. Note this is DIFFERENT from the generic MetaQuotes-Demo test
+# account (109989358), which resolved to "US30"/"XAUUSD" instead —
+# different broker, different feed, different names. If reusing that
+# test account for anything, override these two values first.
 SYMBOL_MAP = {
-    "US30": "US30",     # confirmed on MetaQuotes-Demo test account only
-    "GOLD": "XAUUSD",   # confirmed on MetaQuotes-Demo test account only
+    "US30": "US30Cash",  # confirmed on XM (both demo 345899957 and, by broker match, presumably 330507861)
+    "GOLD": "GOLD",       # confirmed on XM
 }
 
 
