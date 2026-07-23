@@ -118,8 +118,32 @@ Two independent strategy families, both rule-based (the docstring's
   pattern whenever it appears, regardless of Layer 3.
 - Walk-forward tested (`optimize_kwargs=None` path in `run_fold`, i.e.
   strategy's own hardcoded defaults, no per-fold optimization) — see
-  `notebooks/04_liquidity_sweep.ipynb`. Not yet re-run against the full
-  MT5 history the way the two `l4_signal_model` strategies were.
+  `notebooks/04_liquidity_sweep.ipynb`.
+- **Update 2026-07-23: re-run on full MT5 history with Layer 5/6
+  sizing** (`reports/walk_forward_{US30,GOLD}_liquidity_sized.csv`,
+  `reports/liquidity_sweep_sized_equity_curves.png`) — the piece
+  flagged as outstanding since Layer 5 was built. US30 (36 folds):
+  total compounded return **+0.54%**, 41 trades, 39.0% win rate, 13/36
+  folds (36%) positive. Gold (48 folds): total compounded return
+  **+15.86%**, 70 trades, 47.1% win rate, 22/48 folds (46%) positive.
+  Both markedly weaker than `RegimeConfluenceStrategy`'s numbers on the
+  same instruments — expected, since this strategy has no regime gate
+  at all (trades the sweep/BOS/pullback pattern whenever it appears,
+  regardless of Layer 3), unlike the ER-gated strategy.
+  - **New finding, same category as the earlier whole-unit-flooring
+    bug:** on US30, 8 of 49 entry attempts (16%) were rejected by the
+    broker simulation for insufficient margin — 0 rejections on Gold.
+    This strategy's stops are structural/pivot-based rather than
+    ATR-based, and noticeably wide on US30 specifically (mean SL
+    distance ~495 points, max ~988, vs. Gold's mean ~28); the exact
+    mechanism for why that occasionally exceeds available margin at
+    $100k/30x even after `risk_based_size` should already be scaling
+    the position down for a wide stop hasn't been root-caused the way
+    the flooring bug was — flagged here rather than silently
+    absorbed into the return number above. Smaller-magnitude issue
+    than the flooring bug (16% of attempts here vs. 74% of trades
+    lost there), but the same kind of thing: worth digging into
+    before trusting this strategy's numbers as much as the other two.
 
 ## Layer 5 — Position Sizing (`trader/l5_position_sizing.py`)
 
