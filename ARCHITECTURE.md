@@ -130,20 +130,36 @@ Two independent strategy families, both rule-based (the docstring's
   same instruments — expected, since this strategy has no regime gate
   at all (trades the sweep/BOS/pullback pattern whenever it appears,
   regardless of Layer 3), unlike the ER-gated strategy.
-  - **New finding, same category as the earlier whole-unit-flooring
-    bug:** on US30, 8 of 49 entry attempts (16%) were rejected by the
-    broker simulation for insufficient margin — 0 rejections on Gold.
-    This strategy's stops are structural/pivot-based rather than
-    ATR-based, and noticeably wide on US30 specifically (mean SL
-    distance ~495 points, max ~988, vs. Gold's mean ~28); the exact
-    mechanism for why that occasionally exceeds available margin at
-    $100k/30x even after `risk_based_size` should already be scaling
-    the position down for a wide stop hasn't been root-caused the way
-    the flooring bug was — flagged here rather than silently
-    absorbed into the return number above. Smaller-magnitude issue
-    than the flooring bug (16% of attempts here vs. 74% of trades
-    lost there), but the same kind of thing: worth digging into
-    before trusting this strategy's numbers as much as the other two.
+  - **Update 2026-07-23: root-caused.** Read `backtesting.py`'s own
+    `_Broker._process_orders()` (site-packages, not our code): for a
+    proportional `size` in (-1, 1) it converts to whole units as
+    `int(margin_available * leverage * size // adjusted_price_plus_commission)`
+    and cancels the order with an "insufficient margin" warning if that
+    truncates to 0. Substituting `risk_based_size`'s formula
+    (`size = risk_pct * price / (leverage * sl_distance)`) makes
+    `leverage` and `price` cancel out almost entirely, leaving
+    `units ≈ floor(equity * risk_pct / sl_distance)` — units hit 0
+    whenever `sl_distance > equity * risk_pct` **at that moment in the
+    fold**, not at the fold's starting $100k. Two things combine to
+    make that threshold trip on US30 but never on Gold: (1) this
+    strategy's stops are structural/pivot-based, not ATR-based, and run
+    much wider on US30 (mean SL ~495 pts, max ~988) than the naive
+    $100k*1% = 1000-pt threshold suggests should ever fail — but (2)
+    equity drifts *within* a fold from that fold's own earlier trades,
+    so by the time a wide-stop setup shows up later in the fold, the
+    live threshold (current equity * 1%) can already be well under
+    1000, making a 495-988 pt stop enough to floor to 0 units. Gold's
+    stops (mean ~28 pts on a much smaller-priced instrument) never get
+    close regardless of equity drift, hence 0 rejections there. Not a
+    bug — this is `risk_based_size` and `backtesting.py`'s own
+    whole-unit rounding correctly agreeing that a 1%-of-current-equity
+    loss on that particular wide a stop rounds to less than 1 tradeable
+    US30 unit, so the broker sim (correctly) declines the trade rather
+    than under- or over-risking it. Same root shape as the earlier
+    flooring bug, smaller blast radius (16% of attempts vs. 74% of
+    trades), and self-limiting: it only ever fires on the widest-stop,
+    already-drawn-down tail, which is arguably the trade population you
+    least want sized up anyway.
 
 ## Layer 5 — Position Sizing (`trader/l5_position_sizing.py`)
 
