@@ -97,5 +97,84 @@ def load_h4(symbol: str) -> pd.DataFrame:
         raise ValueError(f"Unknown symbol {symbol!r}. Known: {list(MT5_SOURCES)}")
     cfg = MT5_SOURCES[symbol]
     return load_mt5_h4(cfg["path"], cfg["cutoff"])
+
+
+# H1 export config - same shape as MT5_SOURCES, populated by running
+# trader/l1_data_export_h1.py once on the Windows machine (needs a live
+# MT5 terminal, not available from this sandbox). No cutoff handling
+# here since the export script always writes clean single-timeframe
+# files, unlike the hybrid US30 H4 export.
+MT5_H1_SOURCES = {
+    "US30": DATA_DIR / "us30_h1_mt5.csv",
+    "GOLD": DATA_DIR / "gold_h1_mt5.csv",
+}
+
+
+def load_h1(symbol: str) -> pd.DataFrame:
+    """
+    Load H1 bars for a known symbol from its export - same shape as
+    load_h4(). Raises a clear, actionable error (not a bare
+    FileNotFoundError) if the export hasn't been run yet.
+    """
+    symbol = symbol.upper()
+    if symbol not in MT5_H1_SOURCES:
+        raise ValueError(f"Unknown symbol {symbol!r}. Known: {list(MT5_H1_SOURCES)}")
+    path = MT5_H1_SOURCES[symbol]
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} doesn't exist yet. H1 bars need a real MT5 export - run "
+            f"`python -m trader.l1_data_export_h1` on the Windows machine with "
+            f"the MT5 terminal (see that file's docstring), then try again."
+        )
+    return load_mt5_h4(path, cutoff=None)  # same tab-separated MT5 export format, works unchanged
+
+
+# Timeframes derivable from the H4 export by resampling (coarser only -
+# you can't manufacture H1 bars from H4 data, only aggregate H4 into
+# something wider). "H4" itself is the native/no-op case. "H1" is
+# handled separately below (native export, not a resample of H4).
+RESAMPLE_RULES = {
+    "H4": None,   # native, no resampling
+    "D1": "1D",   # calendar-day aggregation of H4 bars
+}
+
+
+def resample_ohlcv(h4: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """
+    Aggregate H4 OHLCV bars up to a coarser timeframe (e.g. "1D" for
+    daily). Standard OHLCV resample: open=first, high=max, low=min,
+    close=last, volume=sum. Drops any resulting bar with no underlying
+    H4 bars (e.g. weekends) rather than leaving it NaN.
+    """
+    agg = h4.resample(rule).agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    })
+    return agg.dropna(subset=["open", "high", "low", "close"])
+
+
+def load_bars(symbol: str, timeframe: str = "H4") -> pd.DataFrame:
+    """
+    Load bars for a known symbol at the given timeframe: "H1" (native,
+    needs trader/l1_data_export_h1.py to have been run once), "H4"
+    (native, the original export), or "D1" (resampled from the H4
+    export - no separate file needed).
+    """
+    timeframe = timeframe.upper()
+    if timeframe == "H1":
+        return load_h1(symbol)
+    if timeframe not in RESAMPLE_RULES:
+        raise ValueError(
+            f"Unknown timeframe {timeframe!r}. Known: 'H1', {list(RESAMPLE_RULES)} "
+            f"('H1' needs its own MT5 export - see trader/l1_data_export_h1.py)."
+        )
+    h4 = load_h4(symbol)
+    rule = RESAMPLE_RULES[timeframe]
+    if rule is None:
+        return h4
+    return resample_ohlcv(h4, rule)
  
 

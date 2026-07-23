@@ -48,6 +48,31 @@ from ..l3_regime import efficiency_ratio
 from ..l5_position_sizing import risk_based_size
 
 # ---------------------------------------------------------------------
+# Timeframe helpers - lets callers pass friendly strings ("H1"/"H4"/"D1",
+# matching l1_data.RESAMPLE_RULES naming) instead of raw mt5.TIMEFRAME_*
+# constants, and gives LiveCircuitBreaker a matching bar_seconds without
+# hardcoding it. Plain dict (no mt5 dependency) so it's safe to read on
+# Linux too; the mt5 constant itself is only resolved lazily, at call
+# time, since mt5 is None outside Windows.
+# ---------------------------------------------------------------------
+TIMEFRAME_SECONDS = {
+    "M1": 60, "M5": 5 * 60, "M15": 15 * 60, "M30": 30 * 60,
+    "H1": 3600, "H4": 4 * 3600, "D1": 24 * 3600,
+}
+
+
+def _resolve_timeframe(timeframe):
+    """Accepts a friendly string ("H1", "H4", "D1", ...) or a raw mt5.TIMEFRAME_* constant already."""
+    if isinstance(timeframe, str):
+        if mt5 is None:
+            raise RuntimeError("MetaTrader5 package not installed - can't resolve a timeframe string without it.")
+        attr = f"TIMEFRAME_{timeframe.upper()}"
+        if not hasattr(mt5, attr):
+            raise ValueError(f"Unknown timeframe {timeframe!r} - no mt5.{attr}.")
+        return getattr(mt5, attr)
+    return timeframe  # already a raw mt5 constant (or None, handled by the caller)
+
+# ---------------------------------------------------------------------
 # Connection
 # ---------------------------------------------------------------------
 
@@ -148,12 +173,18 @@ SYMBOL_MAP = {
 
 def get_live_bars(symbol: str, timeframe=None, count: int = 800) -> pd.DataFrame:
     """
-    Pull the most recent `count` H4 bars for `symbol` from the running
-    terminal, shaped exactly like l1_data.load_h4()'s output (lowercase
-    OHLCV, index named "time") so it's a drop-in feed into the same
-    feature functions build_bt_df() uses for backtesting.
+    Pull the most recent `count` bars (default H4) for `symbol` from the
+    running terminal, shaped exactly like l1_data.load_h4()'s output
+    (lowercase OHLCV, index named "time") so it's a drop-in feed into the
+    same feature functions build_bt_df() uses for backtesting.
+
+    `timeframe` accepts a friendly string ("H1", "H4", "D1", ...), a raw
+    mt5.TIMEFRAME_* constant, or None (defaults to H4, unchanged
+    behavior). This is also how you'd pull real H1 history for backtesting
+    - point this at count=however many bars you want and dump the result
+    to CSV; see trader/l1_data_export_h1.py.
     """
-    tf = timeframe if timeframe is not None else mt5.TIMEFRAME_H4
+    tf = _resolve_timeframe(timeframe) if timeframe is not None else mt5.TIMEFRAME_H4
     rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
     if rates is None or len(rates) == 0:
         raise RuntimeError(f"copy_rates_from_pos({symbol}) returned nothing: {mt5.last_error()}")
@@ -164,9 +195,9 @@ def get_live_bars(symbol: str, timeframe=None, count: int = 800) -> pd.DataFrame
     return df
 
 
-def build_live_features(symbol: str, er_length: int = 20, count: int = 800) -> pd.DataFrame:
+def build_live_features(symbol: str, er_length: int = 20, count: int = 800, timeframe="H4") -> pd.DataFrame:
     """Live equivalent of l2_features.build_bt_df() + the ER column RegimeConfluenceStrategy adds."""
-    d = get_live_bars(symbol, count=count)
+    d = get_live_bars(symbol, timeframe=timeframe, count=count)
     d["ma_360"] = sma(d["close"], 360)
     d["ma_200"] = sma(d["close"], 200)
     d["ema_21"] = ema(d["close"], 21)
@@ -429,7 +460,7 @@ def has_open_position(symbol: str, magic: int) -> bool:
 
 
 def run_once(symbol_key: str, params: dict, risk_pct: float = 0.01, leverage: float = 30,
-             magic: int = 100001, dry_run: bool = True) -> dict:
+             magic: int = 100001, dry_run: bool = True, timeframe="H4") -> dict:
     """
     One polling cycle: fetch live bars -> compute features -> evaluate
     RegimeConfluenceStrategy's entry rule -> check circuit breaker and
@@ -437,6 +468,15 @@ def run_once(symbol_key: str, params: dict, risk_pct: float = 0.01, leverage: fl
     clears. `params` are the optimized values from the latest
     walk-forward fold (er_threshold, swing_lookback, atr_sl_mult,
     atr_tp_mult) — see ARCHITECTURE.md for how to get current ones.
+
+    `timeframe` accepts a friendly string ("H1", "H4", "D1", ...) or a
+    raw mt5.TIMEFRAME_* constant, and drives BOTH the live bar pull
+    (build_live_features) and the circuit breaker's cooldown math
+    (LiveCircuitBreaker.bar_seconds) - these two used to be independently
+    hardcoded to H4, which would have silently mismatched if only one
+    were changed. Whatever timeframe you pick here must match the
+    timeframe the walk-forward validation for `params` was actually run
+    on - see ARCHITECTURE.md's timeframe-sweep section.
     """
     symbol = SYMBOL_MAP.get(symbol_key)
     if not symbol:
@@ -445,11 +485,12 @@ def run_once(symbol_key: str, params: dict, risk_pct: float = 0.01, leverage: fl
     if has_open_position(symbol, magic):
         return {"action": "skip", "reason": "position already open"}
 
-    breaker = LiveCircuitBreaker(symbol=symbol, magic=magic)
+    bar_seconds = TIMEFRAME_SECONDS[timeframe.upper()] if isinstance(timeframe, str) else 4 * 3600
+    breaker = LiveCircuitBreaker(symbol=symbol, magic=magic, bar_seconds=bar_seconds)
     if breaker.in_cooldown():
         return {"action": "skip", "reason": "circuit breaker cooldown"}
 
-    df = build_live_features(symbol, er_length=params.get("er_length", 20))
+    df = build_live_features(symbol, er_length=params.get("er_length", 20), timeframe=timeframe)
     signal = evaluate_regime_confluence_signal(
         df,
         er_threshold=params.get("er_threshold", 0.35),

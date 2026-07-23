@@ -9,7 +9,7 @@ structure helpers used for breakout detection.
 import numpy as np
 import pandas as pd
 
-from .l1_data import load_h4
+from .l1_data import load_h4, load_bars
 
 # build_bt_df() used to take Yahoo Finance tickers. Keep those working so
 # existing notebook cells (build_bt_df("^DJI"), build_bt_df("GC=F")) don't
@@ -65,18 +65,23 @@ def swing_low(low, n):
     return low.rolling(n).min().shift(1)
 
 
-def build_bt_df(symbol, start=None, period="730d"):
+def build_bt_df(symbol, start=None, period="730d", timeframe="H4"):
     """
-    Layers 1+2 combined: load a symbol's H4 bars from its MT5 export and
-    attach every indicator column, renamed to the Open/High/Low/Close/Volume
-    capitalization backtesting.py expects.
+    Layers 1+2 combined: load a symbol's bars from its MT5 export (at
+    the given timeframe) and attach every indicator column, renamed to
+    the Open/High/Low/Close/Volume capitalization backtesting.py expects.
+
+    `timeframe` defaults to "H4" (native, unchanged behavior). "D1" is
+    also available, resampled from the same H4 export - see
+    l1_data.load_bars/RESAMPLE_RULES. Anything finer than H4 (e.g. H1)
+    needs its own MT5 export and isn't available via this resample path.
 
     `start`/`period` are no longer used — MT5 exports are loaded in full
     (kept as accepted-but-ignored params so existing call sites don't
     break) — and now return the entire history instead of yfinance's
     730-day intraday cap.
     """
-    d = load_h4(_LEGACY_SYMBOL_MAP.get(symbol, symbol))
+    d = load_bars(_LEGACY_SYMBOL_MAP.get(symbol, symbol), timeframe=timeframe)
     d["ma_360"] = sma(d["close"], 360)
     d["ma_200"] = sma(d["close"], 200)
     d["ma_89"] = sma(d["close"], 89)
