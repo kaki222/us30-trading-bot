@@ -255,11 +255,31 @@ class LiveCircuitBreaker:
     bar_seconds: int = 4 * 3600  # H4
 
     def in_cooldown(self) -> bool:
-        deals = mt5.history_deals_get(
-            datetime.now(timezone.utc).replace(year=datetime.now().year - 1),
-            datetime.now(timezone.utc),
-            group=f"*{self.symbol}*",
-        )
+        """
+        Bug fixed 2026-07-23, found via real testing (not the mock):
+        MT5 deal timestamps are in the broker's SERVER time, which is
+        commonly offset ~3h from true UTC (varies by broker/DST) - not
+        the same clock as datetime.now(timezone.utc)) on this machine.
+        The original version compared server-time deal timestamps
+        against local-machine UTC "now", so recent deals could appear
+        to be timestamped in the future relative to that boundary and
+        get silently excluded from the query window - confirmed via
+        debug_deals.py, which measured a ~10,799s (~3h) skew directly.
+
+        Fix: get "now" from a live tick instead of the local clock, so
+        every timestamp compared here - the query window, the deal
+        times, and the cooldown-expiry check - is in the same server-
+        time domain. Never mix local-clock time with deal.time again.
+        """
+        tick = mt5.symbol_info_tick(self.symbol)
+        if tick is None:
+            return False  # can't determine server time - fail open rather than block trading on a data error
+        server_now = tick.time  # epoch seconds, server time - same clock deal.time uses
+
+        date_from = datetime.fromtimestamp(server_now - 365 * 24 * 3600, tz=timezone.utc)
+        date_to = datetime.fromtimestamp(server_now + 3600, tz=timezone.utc)  # +1h pad against residual clock skew
+
+        deals = mt5.history_deals_get(date_from, date_to, group=f"*{self.symbol}*")
         if not deals:
             return False
         closes = sorted(
@@ -279,9 +299,8 @@ class LiveCircuitBreaker:
         if consecutive < self.max_consecutive_losses:
             return False
 
-        last_close_time = datetime.fromtimestamp(closes[-1].time, tz=timezone.utc)
-        cooldown_until = last_close_time.timestamp() + self.cooldown_bars * self.bar_seconds
-        return datetime.now(timezone.utc).timestamp() < cooldown_until
+        cooldown_until = closes[-1].time + self.cooldown_bars * self.bar_seconds  # both in server-time epoch seconds
+        return server_now < cooldown_until
 
 
 # ---------------------------------------------------------------------
@@ -357,6 +376,44 @@ def place_trade(symbol: str, direction: str, sl: float, tp: float, risk_pct: flo
 
     result = mt5.order_send(request)
     return {"dry_run": False, "request": request, "result": result}
+
+
+def close_position(ticket: int, deviation: int = 20) -> dict:
+    """
+    Close an open position by its ticket - sends the opposite-direction
+    order for the same volume, tagged with `position` so MT5 nets it
+    against the existing position rather than opening a new one. Used
+    by test scripts (e.g. deliberately opening and immediately closing
+    a few tiny positions to generate real closed-loss deals for
+    LiveCircuitBreaker to read) as well as any future manual/EA exit.
+    """
+    positions = mt5.positions_get(ticket=ticket)
+    if not positions:
+        raise RuntimeError(f"No open position with ticket {ticket}: {mt5.last_error()}")
+    pos = positions[0]
+
+    tick = mt5.symbol_info_tick(pos.symbol)
+    if tick is None:
+        raise RuntimeError(f"symbol_info_tick({pos.symbol}) failed: {mt5.last_error()}")
+
+    close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+    price = tick.bid if close_type == mt5.ORDER_TYPE_SELL else tick.ask
+
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": pos.symbol,
+        "volume": pos.volume,
+        "type": close_type,
+        "position": ticket,
+        "price": price,
+        "deviation": deviation,
+        "magic": pos.magic,
+        "comment": "l7_close",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+    result = mt5.order_send(request)
+    return {"request": request, "result": result}
 
 
 # ---------------------------------------------------------------------
