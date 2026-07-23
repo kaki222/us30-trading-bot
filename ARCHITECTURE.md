@@ -17,7 +17,7 @@ edited to say otherwise.
 | 4 | Signal Model | `trader/l4_signal_model.py`, `trader/l4_liquidity_strategy.py` | ✅ Rule-based, done; not yet ML |
 | 5 | Position Sizing | `trader/l5_position_sizing.py` | ✅ Risk-based, wired into all strategies |
 | 6 | Risk Overlay | `trader/l6_risk.py` | ✅ Extracted, shared by all Layer 4 strategies |
-| 7 | Execution | `trader/l7_execution/` | ⚠️ Written, **not yet run** — needs a Windows smoke test |
+| 7 | Execution | `trader/l7_execution/` | ✅ Fully verified against real MT5 (test account + XM feed) |
 
 ---
 
@@ -270,9 +270,39 @@ kind of EMA/MACD-vs-macro-trend mismatch. Correct behavior, not a gap
 — confirms the rule logic is internally consistent on real current
 data, not just non-crashing.
 
-**Still unverified:** `run_once()` end-to-end (its individual pieces —
-fetch, feature, signal, size, trade — are now all proven separately,
-but the orchestration itself hasn't been run as a whole).
+**Update 2026-07-23 (final): `run_once()` verified end-to-end — Layer 7
+is now fully proven, not just plumbed.**
+
+Real market conditions at test time didn't satisfy the confluence
+rules on either instrument, even with the regime gate forced open
+(`er_threshold=0.0`) — confirmed both instruments correctly returned
+`{"action": "skip", "reason": "no signal"}` via `test_run_once.py`,
+consistent with the real ER/EMA/MACD readings already checked by hand
+above. That proved the skip path but not the "found a signal" path,
+since live conditions wouldn't cooperate. Rather than wait, monkey-
+patched `evaluate_regime_confluence_signal()` to return a fixed fake
+signal (`test_run_once_forced_signal.py`) and ran `run_once()` for
+real against XM with everything else live (`has_open_position`, the
+circuit breaker check, real account/symbol) — asserted the signal's
+SL/TP actually made it into the constructed order request, not just
+that something executed without an exception.
+
+One correct-but-worth-confirming behavior this surfaced: the
+constructed order's `price` field was the real current market price,
+not the fake signal's price — because `place_trade()` never uses a
+signal's `price` at all, it re-fetches its own live tick internally at
+execution time and only takes `sl`/`tp` from the caller. Right design
+(a fresh price beats a stale one from feature-building time), now
+confirmed by a real test rather than assumed from reading the code.
+
+With this, every function in `trader/l7_execution/` has been run for
+real at least once — the read path, the sizing math, real order
+placement (dry-run and `dry_run=False`), the circuit breaker (after
+fixing its real bug), the signal-generation path against XM's actual
+feed, and now the full orchestration. `dry_run=False` has only ever
+been exercised on the throwaway MetaQuotes-Demo account (109989358) —
+that should stay true; nothing here has sent a real order to XM, by
+design, and shouldn't until there's a specific reason to.
 
 - `connect()` / `shutdown()` / `account_summary()` — attach to an
   already-running, already-logged-in MT5 terminal. **Verified working.**
@@ -323,9 +353,11 @@ but the orchestration itself hasn't been run as a whole).
   as the default; still never run against XM.
 - `run_once()` — one full polling cycle: skip if a position is already
   open, skip if the circuit breaker is in cooldown, else fetch → feature
-  → signal → size → (dry-run or real) trade. **Still unverified** —
-  the individual pieces it calls are now proven, but the orchestration
-  itself hasn't been run end to end.
+  → signal → size → (dry-run or real) trade. **Verified** — both the
+  real "no signal" skip path and (via a monkeypatched signal, since
+  real conditions didn't cooperate) the "found a signal → dry-run
+  trade" path, with the SL/TP asserted to actually reach the
+  constructed order request.
 
 ### Test scripts added during real verification (`trader/l7_execution/`)
 
