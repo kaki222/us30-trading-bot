@@ -24,13 +24,22 @@ first time you run it.
 Caveat that matters: how far back this can actually reach depends on
 your broker's history retention and the terminal's own "Max bars in
 history" setting (Tools > Options > Charts), not on this script. It
-asks for a wide range (2010-01-01 to now) and just takes whatever MT5
-actually hands back - check the printed date range in the output before
-assuming you got the same multi-year depth the H4 exports have.
+paginates backward in 5,000-bar chunks until the terminal stops
+returning full chunks - check the printed date range in the output
+before assuming you got the same multi-year depth the H4 exports have.
+
+Fetch method note: an earlier version tried a single copy_rates_range()
+call (2010 -> now) and, after that failed, a single huge
+copy_rates_from_pos(0, 200_000) call - both failed identically with
+(-2, 'Invalid params') on a real run against XM demo 345899957. Since
+copy_rates_from_pos doesn't take dates at all, the common factor was
+the oversized single request, not a timezone issue - the terminal
+appears to reject requests above some undocumented size. Paginating in
+5,000-bar chunks (well under the 800-bar count that's worked all
+session for live pulls) works around that.
 """
 
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -51,32 +60,42 @@ EXPORT_TARGETS = {
 }
 
 
-def export_h1(symbol: str, out_path: Path) -> None:
-    # copy_rates_range() rejects timezone-aware datetime objects with a
-    # bare (-2, "Invalid params") - no other explanation given. Fix:
-    # pass naive datetimes (MT5 treats them as UTC/server time itself).
-    # Confirmed via real run 2026-07-23: tz-aware datetime(...,
-    # tzinfo=timezone.utc) failed with exactly this error on both
-    # symbols; this is the fix, not yet re-confirmed after the fix.
-    date_from = datetime(2010, 1, 1)
-    date_to = datetime.now(timezone.utc).replace(tzinfo=None)
+def export_h1(symbol: str, out_path: Path, chunk_size: int = 5000, max_chunks: int = 100) -> None:
+    """
+    Paginated fetch: copy_rates_from_pos(symbol, H1, start_pos, count)
+    walking backward in chunk_size-bar steps, accumulating, until a
+    chunk comes back empty (reached the earliest available history) or
+    max_chunks is hit. Both the single-shot copy_rates_range(2010->now)
+    and a single huge copy_rates_from_pos(0, 200_000) call failed with
+    (-2, 'Invalid params') on a real run 2026-07-23 - the range variant
+    fails on timezone-aware datetimes (a documented gotcha), but the
+    from_pos variant takes no dates at all and still failed identically
+    with only `count` unusually large, which points at the terminal
+    rejecting oversized single requests rather than a datetime issue.
+    chunk_size=5000 is well under that, matching the get_live_bars()
+    count=800 default that's worked all session, just chunked to cover
+    real history depth instead of only the most recent count.
+    """
+    all_chunks = []
+    start_pos = 0
+    for i in range(max_chunks):
+        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, start_pos, chunk_size)
+        if rates is None:
+            print(f"  {symbol}: chunk {i} (start_pos={start_pos}) failed: {mt5.last_error()}")
+            break
+        if len(rates) == 0:
+            break  # ran out of history
+        all_chunks.append(pd.DataFrame(rates))
+        if len(rates) < chunk_size:
+            break  # partial chunk = this was the oldest available data
+        start_pos += chunk_size
 
-    rates = mt5.copy_rates_range(symbol, mt5.TIMEFRAME_H1, date_from, date_to)
-    if rates is None or len(rates) == 0:
-        err = mt5.last_error()
-        print(f"  {symbol}: copy_rates_range returned nothing ({err}) - trying copy_rates_from_pos fallback...")
-        # Fallback: ask for the most recent N bars by position instead of
-        # a date range - simpler call, less prone to whatever the range
-        # variant's param validation is rejecting. 200,000 H1 bars is
-        # ~22 years if the broker actually has that much history; MT5
-        # just returns however many it actually has, doesn't error if
-        # fewer are available.
-        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 200_000)
-        if rates is None or len(rates) == 0:
-            print(f"  {symbol}: fallback also returned nothing ({mt5.last_error()}) - skipping.")
-            return
+    if not all_chunks:
+        print(f"  {symbol}: no H1 bars returned at all - skipping.")
+        return
 
-    df = pd.DataFrame(rates)
+    df = pd.concat(all_chunks, ignore_index=True)
+    df = df.drop_duplicates(subset=["time"]).sort_values("time").reset_index(drop=True)
     df["time"] = pd.to_datetime(df["time"], unit="s", utc=True).dt.tz_localize(None)
 
     # Write out in the same <DATE>\t<TIME>\t<OPEN>\t<HIGH>\t<LOW>\t<CLOSE>\t<TICKVOL>\t<VOL>\t<SPREAD>
