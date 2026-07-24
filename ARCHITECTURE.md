@@ -161,6 +161,55 @@ Two independent strategy families, both rule-based (the docstring's
     already-drawn-down tail, which is arguably the trade population you
     least want sized up anyway.
 
+## Timeframe sweep (2026-07-24)
+
+Timeframe was hardcoded to H4 everywhere (data loading, feature
+building, live bar pulls, circuit breaker cooldown math) until now.
+`l1_data.load_bars(symbol, timeframe)` / `l2_features.build_bt_df(...,
+timeframe=)` / `l7_execution.run_once(..., timeframe=)` all accept
+"H1"/"H4"/"D1" now (see those modules' docstrings). D1 is resampled
+from the existing H4 export (no new data). H1 needed a real MT5 export
+- `trader/l1_data_export_h1.py`, run by the user against XM demo
+345899957: US30 61,244 H1 bars (2011-08-10 -> present), Gold 81,444 H1
+bars (2001-06-04 -> present). That script's first two attempts both
+failed with `(-2, 'Invalid params')` - once from passing timezone-aware
+datetimes to `copy_rates_range()`, and again from a single oversized
+`copy_rates_from_pos(0, 200_000)` call; fixed by paginating in
+5,000-bar chunks.
+
+**RegimeConfluenceStrategy across timeframes** (same walk-forward
+harness, same $100k/1%-risk sizing everywhere):
+
+- H4 (production baseline, full-grid optimized, already on record
+  above): US30 **+24.7%**, 251 trades, 61.1% fold win rate, 8.2% max
+  drawdown. Gold **+28.7%**, 235 trades, 52.1% fold win rate, 17.9% max
+  drawdown.
+- D1 (small 16-combo grid, not the full 288-combo
+  `REGIME_OPTIMIZE_KWARGS` - sandbox time constraints): US30 **-2.29%**,
+  41 trades, 31% folds positive. Gold **+24.96%**, 62 trades, 42% folds
+  positive. (Fixed-defaults-only pass, before optimizing: US30 -7.66%,
+  Gold +15.87% - optimization narrowed the US30 gap and pushed Gold
+  above its own fixed-default number, but neither beats H4.)
+- H1 (fixed defaults only - the small-grid optimizer that worked for
+  D1 didn't finish even one fold within the sandbox's time limit at H1's
+  bar count, ~23x D1's): US30 **-45.26%**, 1,382 trades, 42% folds
+  positive. Gold **-76.05%**, 1,830 trades, 36% folds positive.
+
+**Conclusion: H4 stays the production timeframe.** D1 is a mixed
+downgrade (competitive on Gold's total return but on a third of the
+trades, so noisier; a clear loss on US30). H1 is decisively worse on
+both instruments even before any optimization - the size of the loss
+(-45%/-76%) combined with trade counts 5-8x higher than H4 points at
+the strategy's parameters (`ma_360`, ATR multipliers, `swing_lookback`)
+being calibrated for H4's noise/signal ratio and simply not
+transferring to hourly bars, not a "needs better params" gap that
+optimization would likely close. Not pursued further given how
+decisive the fixed-default result already was - optimizing H1 properly
+would need to run outside the sandbox (e.g. the user's own venv, no
+45-second cap) if this is ever revisited.
+
+---
+
 ## Layer 5 — Position Sizing (`trader/l5_position_sizing.py`)
 
 `risk_based_size(price, sl, risk_pct, leverage)`: replaces the old
