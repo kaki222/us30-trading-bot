@@ -52,13 +52,29 @@ EXPORT_TARGETS = {
 
 
 def export_h1(symbol: str, out_path: Path) -> None:
-    date_from = datetime(2010, 1, 1, tzinfo=timezone.utc)
-    date_to = datetime.now(timezone.utc)
+    # copy_rates_range() rejects timezone-aware datetime objects with a
+    # bare (-2, "Invalid params") - no other explanation given. Fix:
+    # pass naive datetimes (MT5 treats them as UTC/server time itself).
+    # Confirmed via real run 2026-07-23: tz-aware datetime(...,
+    # tzinfo=timezone.utc) failed with exactly this error on both
+    # symbols; this is the fix, not yet re-confirmed after the fix.
+    date_from = datetime(2010, 1, 1)
+    date_to = datetime.now(timezone.utc).replace(tzinfo=None)
 
     rates = mt5.copy_rates_range(symbol, mt5.TIMEFRAME_H1, date_from, date_to)
     if rates is None or len(rates) == 0:
-        print(f"  {symbol}: no H1 bars returned ({mt5.last_error()}) - skipping.")
-        return
+        err = mt5.last_error()
+        print(f"  {symbol}: copy_rates_range returned nothing ({err}) - trying copy_rates_from_pos fallback...")
+        # Fallback: ask for the most recent N bars by position instead of
+        # a date range - simpler call, less prone to whatever the range
+        # variant's param validation is rejecting. 200,000 H1 bars is
+        # ~22 years if the broker actually has that much history; MT5
+        # just returns however many it actually has, doesn't error if
+        # fewer are available.
+        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 200_000)
+        if rates is None or len(rates) == 0:
+            print(f"  {symbol}: fallback also returned nothing ({mt5.last_error()}) - skipping.")
+            return
 
     df = pd.DataFrame(rates)
     df["time"] = pd.to_datetime(df["time"], unit="s", utc=True).dt.tz_localize(None)
