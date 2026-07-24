@@ -499,17 +499,20 @@ call's result was kept anywhere - both gaps closed now:
   "weekly" review will have gaps on days it wasn't run. Acceptable
   trade for staying in control of it. Task Scheduler setup steps are
   kept below in case the unattended version is ever wanted later. Not
-  yet run for real either way (same honesty caveat as the rest of this
-  file - written against the already-verified `run_once()`, but this
-  specific script hasn't been executed).
+  **Update 2026-07-24: run for real** — `python -m
+  trader.l7_execution.run_scheduled "...\terminal64.exe"` against XM
+  demo 345899957, connected fine, evaluated both US30 and GOLD,
+  correctly returned "skip (no signal)" for both (matches the regime
+  gate being picky by design, same as every other real signal check
+  this week).
 - `journal.py` — append-only JSON-Lines log (`data/journal.jsonl`), one
   line per `run_once()` result. JSONL over CSV because "skip" and
   "trade" results have different, nested shapes that don't flatten into
   one schema cleanly. Append is a single atomic write, so concurrent
   runs can't corrupt each other. **Verified** — round-tripped fake
   entries matching `run_once()`'s real result shapes through
-  `append_entry`/`read_entries` in the sandbox (no MT5 needed for this
-  part, it's pure file I/O).
+  `append_entry`/`read_entries` in the sandbox first, **then for real**:
+  the run above appended 2 real entries without error.
 - `journal_summary.py` — reads the journal, defaults to the last 7 days
   (`--days N` to change), breaks down skip reasons and signal fires per
   instrument. Right now (before `dry_run` is ever flipped to `False`
@@ -517,9 +520,17 @@ call's result was kept anywhere - both gaps closed now:
   actually have fired this week." Once real trades exist, the intent is
   the same script compares realized win rate/expectancy against the
   walk-forward backtest's numbers, to catch live drift early rather
-  than months in. **Verified** — same fake-entry round-trip as above,
-  confirmed the report renders correctly (skip-reason counts, per-symbol
-  breakdown, dry-run vs real trade tagging).
+  than months in. **Verified** — sandbox fake-entry round-trip first,
+  **then for real**: `python -m trader.l7_execution.journal_summary`
+  read the 2 real entries back and rendered the report correctly (2
+  total, 2 in window, per-symbol skip-reason breakdown, 0/0 dry-run/real
+  trade totals - all matching what was actually journaled).
+
+The full loop - `run_once()` → `run_scheduled.py` → `journal.py` →
+`journal_summary.py` - is now verified against real MT5 data end to
+end, not just sandbox-simulated. What's left isn't more code, it's
+time: run it periodically (manually, per the decision above) and let a
+real week of entries accumulate before the weekly review means anything.
 
 **Windows Task Scheduler setup** (not the chosen path - see decision
 above - kept here only in case the unattended version is wanted later;
