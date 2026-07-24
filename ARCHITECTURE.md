@@ -474,6 +474,59 @@ isn't the designated test account (109989358) — kept as a reusable
 pattern for any future Layer 7 test script that can send orders.
 `test_signal_readonly.py` doesn't need that gate, by construction.
 
+### Scheduling + journal (2026-07-24)
+
+`run_once()` existed but nothing ever called it more than once, and no
+call's result was kept anywhere - both gaps closed now:
+
+- `run_scheduled.py` — single-shot script: one `run_once()` pass over
+  both US30 and GOLD, `dry_run=True` (hardcoded, not a flag - see its
+  docstring for why), `timeframe="H4"` (confirmed the best of H1/H4/D1
+  by the timeframe sweep above), `magic=100001` (the one magic number
+  *not* prefixed `999xxx` - every test script's magic was chosen
+  specifically to stay out of this one's way). Meant to be triggered by
+  **Windows Task Scheduler**, not run as a long-lived
+  `while True: sleep()` loop - a scheduled task survives reboots and
+  doesn't depend on a terminal window staying open. Not yet run for
+  real (same honesty caveat as the rest of this file - written against
+  the already-verified `run_once()`, but this specific script hasn't
+  been executed).
+- `journal.py` — append-only JSON-Lines log (`data/journal.jsonl`), one
+  line per `run_once()` result. JSONL over CSV because "skip" and
+  "trade" results have different, nested shapes that don't flatten into
+  one schema cleanly. Append is a single atomic write, so concurrent
+  runs can't corrupt each other. **Verified** — round-tripped fake
+  entries matching `run_once()`'s real result shapes through
+  `append_entry`/`read_entries` in the sandbox (no MT5 needed for this
+  part, it's pure file I/O).
+- `journal_summary.py` — reads the journal, defaults to the last 7 days
+  (`--days N` to change), breaks down skip reasons and signal fires per
+  instrument. Right now (before `dry_run` is ever flipped to `False`
+  here) this is just a signal-frequency check - "how often would this
+  actually have fired this week." Once real trades exist, the intent is
+  the same script compares realized win rate/expectancy against the
+  walk-forward backtest's numbers, to catch live drift early rather
+  than months in. **Verified** — same fake-entry round-trip as above,
+  confirmed the report renders correctly (skip-reason counts, per-symbol
+  breakdown, dry-run vs real trade tagging).
+
+**Windows Task Scheduler setup** (do this yourself; I have no presence
+on your machine to do it for you):
+1. Task Scheduler → Create Task (not "Basic Task" - need the Conditions
+   tab). General tab: run whether user is logged in or not, if you want
+   it to survive a locked screen.
+2. Triggers tab → New → Daily, recur every 1 day, **Repeat task every:
+   4 hours**, for a duration of 1 day (so it re-fires every 4h
+   indefinitely) - this is what approximates H4 candle-close alignment
+   without hand-maintaining 6 separate daily trigger times.
+3. Actions tab → New → Program: your venv's `python.exe` (full path,
+   e.g. `C:\Users\milat\Documents\us30-trading-bot\venv\Scripts\python.exe`)
+   → Arguments: `-m trader.l7_execution.run_scheduled "C:\path\to\terminal64.exe"`
+   → Start in: `C:\Users\milat\Documents\us30-trading-bot`.
+4. The MT5 terminal itself still needs to be running and logged into
+   the XM demo (345899957) for this to work - Task Scheduler runs the
+   script, not the terminal.
+
 ### Testing this yourself (I cannot do this part)
 
 On the Windows machine with the MT5 terminal, logged into an XM demo
@@ -511,9 +564,10 @@ real test.
 
 ### Not done yet
 
-- No `run_loop()` bar-close scheduler wired up — `run_once()` exists,
-  calling it on a timer (aligned to H4 candle closes, not naive
-  polling) is the next piece.
+- `run_scheduled.py` + Windows Task Scheduler setup exist now (see
+  above) but the script itself hasn't actually been run yet - same as
+  everything else in this file, written and reasoned through but not
+  yet exercised for real. That's the next actual step, not more code.
 - No wiring for `LiquiditySweepStrategy` (only `RegimeConfluenceStrategy`
   is ported) or for the un-optimized `ConfluenceStrategy` variant.
 - `LiveCircuitBreaker`'s `history_deals_get` window and grouping filter
