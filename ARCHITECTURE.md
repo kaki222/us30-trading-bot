@@ -484,13 +484,24 @@ call's result was kept anywhere - both gaps closed now:
   docstring for why), `timeframe="H4"` (confirmed the best of H1/H4/D1
   by the timeframe sweep above), `magic=100001` (the one magic number
   *not* prefixed `999xxx` - every test script's magic was chosen
-  specifically to stay out of this one's way). Meant to be triggered by
-  **Windows Task Scheduler**, not run as a long-lived
-  `while True: sleep()` loop - a scheduled task survives reboots and
-  doesn't depend on a terminal window staying open. Not yet run for
-  real (same honesty caveat as the rest of this file - written against
-  the already-verified `run_once()`, but this specific script hasn't
-  been executed).
+  specifically to stay out of this one's way). Needs no admin rights to
+  run - it's a plain script, nothing Task-Scheduler-specific baked in.
+  **Decision 2026-07-24: run it manually, at will**, from PowerShell or
+  VS Code's terminal (`python -m trader.l7_execution.run_scheduled
+  "path\to\terminal64.exe"`), not via Windows Task Scheduler. Task
+  Scheduler's "Create Task" dialog turned out to require a UAC
+  elevation prompt on this machine, which computer-use automation
+  can't click through (a hard OS security boundary, not a settings
+  issue) - would have needed the user to babysit every setup click
+  anyway, so simpler to just skip it. Trade-off, stated plainly: manual
+  invocation means the journal only fills in when someone actually runs
+  it, not an even every-4-hours drumbeat - `journal_summary.py`'s
+  "weekly" review will have gaps on days it wasn't run. Acceptable
+  trade for staying in control of it. Task Scheduler setup steps are
+  kept below in case the unattended version is ever wanted later. Not
+  yet run for real either way (same honesty caveat as the rest of this
+  file - written against the already-verified `run_once()`, but this
+  specific script hasn't been executed).
 - `journal.py` — append-only JSON-Lines log (`data/journal.jsonl`), one
   line per `run_once()` result. JSONL over CSV because "skip" and
   "trade" results have different, nested shapes that don't flatten into
@@ -510,8 +521,10 @@ call's result was kept anywhere - both gaps closed now:
   confirmed the report renders correctly (skip-reason counts, per-symbol
   breakdown, dry-run vs real trade tagging).
 
-**Windows Task Scheduler setup** (do this yourself; I have no presence
-on your machine to do it for you):
+**Windows Task Scheduler setup** (not the chosen path - see decision
+above - kept here only in case the unattended version is wanted later;
+do this yourself, I have no presence on your machine to do it for you,
+and "Create Task" needs a UAC prompt I genuinely cannot click through):
 1. Task Scheduler → Create Task (not "Basic Task" - need the Conditions
    tab). General tab: run whether user is logged in or not, if you want
    it to survive a locked screen.
