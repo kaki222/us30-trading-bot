@@ -1,26 +1,41 @@
 """
-live_monitor.py — desktop dashboard: one live candlestick chart per
-instrument, refreshed on an interval, each titled with its current
-Efficiency Ratio / regime classification, your manual BIAS setting
-(from run_scheduled.py), and the circuit breaker's live cooldown
-status. Also prints the same info as a one-line-per-symbol log to the
-console each cycle, so you have a plain-text history even with the
-chart window closed.
+live_monitor.py — one persistent, live-refreshing dashboard window:
+a column per instrument, each with three stacked panels:
+  1. Candlesticks + the actual indicators RegimeConfluenceStrategy's
+     entry rule checks — EMA8/EMA21 (trend cross), MA200/MA360 (macro
+     trend filter), and the rolling swing-high/low levels price has to
+     break for a BOS entry. If it's not one of these, it isn't part of
+     why the bot would or wouldn't fire here.
+  2. Efficiency Ratio over time, with the er_threshold line and the
+     "tradeable trend" zone shaded — the regime gate, visible as a
+     history instead of a single instantaneous number.
+  3. MACD histogram (green/red by sign) — the other half of the entry
+     rule's momentum check.
+Each column's price panel is titled with close, ER, TRENDING/CHOP,
+your BIAS (from run_scheduled.py), and circuit-breaker cooldown status,
+color-coded. The same info also prints as a one-line log per symbol
+per cycle, so there's a plain-text record even with the window closed.
 
-Read-only: this never calls place_trade() or touches an order, and
-never runs run_once() - it only reads bars and computes the same
-features run_once() would, on its own timer, independent of the
-scheduled trading cycle. Safe to leave open all day.
+Read-only: never calls place_trade() or run_once() - it's on its own
+refresh timer, independent of the scheduled trading cycle. Safe to
+leave open all day.
 
-BIAS/TIMEFRAME/PARAMS/MAGIC are imported from run_scheduled.py rather
-than redefined here, so this always reflects whatever that script is
-actually configured to trade - editing your bias in one place updates
-what both scripts see.
+BIAS/TIMEFRAME/PARAMS/MAGIC come from run_scheduled.py, not redefined
+here, so this always reflects whatever that script is actually
+configured to trade - edit your bias there, this picks it up.
+
+If the window opens but stays blank: that's a matplotlib GUI backend
+issue on your machine, not this script's logic (the print log will
+still be updating in the terminal even if the chart isn't drawing).
+Try `pip install PyQt5`, then add these two lines at the very top of
+this file, before the `matplotlib.pyplot` import:
+    import matplotlib
+    matplotlib.use("QtAgg")
 
 Needs mplfinance in addition to what run_scheduled.py already needs:
     (venv) PS> pip install mplfinance
 
-Close the chart window or Ctrl+C in the terminal to stop.
+Close the window or Ctrl+C in the terminal to stop.
 
     (venv) PS> python -m trader.l7_execution.live_monitor
     (venv) PS> python -m trader.l7_execution.live_monitor "C:\\path\\to\\terminal64.exe"
@@ -29,7 +44,6 @@ Close the chart window or Ctrl+C in the terminal to stop.
 """
 
 import argparse
-import sys
 import time
 from datetime import datetime, timezone
 
@@ -39,28 +53,91 @@ import mplfinance as mpf
 
 from . import (
     connect, shutdown, SYMBOL_MAP, TIMEFRAME_SECONDS,
-    build_live_features, LiveCircuitBreaker,
+    build_live_features, LiveCircuitBreaker, _swing_high, _swing_low,
 )
 from .run_scheduled import BIAS, TIMEFRAME, PARAMS, MAGIC
 
 
-def _status_line(symbol_key: str, symbol: str, df: pd.DataFrame, timeframe: str) -> tuple[str, dict]:
-    """One symbol's current readout: close, ER, regime, bias, breaker status."""
+def _regime_info(symbol_key: str, symbol: str, df: pd.DataFrame, timeframe: str) -> dict:
     row = df.iloc[-1]
     er = row["er"]
     trending = bool(er > PARAMS["er_threshold"]) if pd.notna(er) else False
-    regime = "TRENDING" if trending else "CHOP" if pd.notna(er) else "warming up"
+    regime = "TRENDING" if trending else ("CHOP" if pd.notna(er) else "warming up")
     bias = BIAS.get(symbol_key) or "neutral"
 
     breaker = LiveCircuitBreaker(symbol=symbol, magic=MAGIC, bar_seconds=TIMEFRAME_SECONDS[timeframe.upper()])
     cooldown = breaker.in_cooldown()
 
-    line = (f"{datetime.now(timezone.utc).isoformat(timespec='seconds')}  "
-            f"{symbol_key:6s} close={row['Close']:>10.2f}  "
-            f"ER={er:.3f}  regime={regime:9s} bias={bias:7s} "
-            f"breaker={'COOLDOWN' if cooldown else 'clear'}")
-    info = {"close": row["Close"], "er": er, "regime": regime, "bias": bias, "cooldown": cooldown}
-    return line, info
+    return {"close": row["Close"], "er": er, "regime": regime, "bias": bias, "cooldown": cooldown}
+
+
+def _log_line(symbol_key: str, info: dict) -> str:
+    return (f"{datetime.now(timezone.utc).isoformat(timespec='seconds')}  "
+            f"{symbol_key:6s} close={info['close']:>10.2f}  "
+            f"ER={info['er']:.3f}  regime={info['regime']:9s} bias={info['bias']:7s} "
+            f"breaker={'COOLDOWN' if info['cooldown'] else 'clear'}")
+
+
+def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
+                    bars: int, timeframe: str) -> dict:
+    df = build_live_features(symbol, er_length=PARAMS.get("er_length", 20), timeframe=timeframe)
+    swing_hi = _swing_high(df["High"], PARAMS["swing_lookback"]).tail(bars)
+    swing_lo = _swing_low(df["Low"], PARAMS["swing_lookback"]).tail(bars)
+    chart_df = df.tail(bars)
+
+    info = _regime_info(symbol_key, symbol, df, timeframe)
+    print(_log_line(symbol_key, info))
+
+    for ax in (price_ax, er_ax, macd_ax):
+        ax.clear()
+
+    er_threshold_line = pd.Series(PARAMS["er_threshold"], index=chart_df.index)
+    macd_colors = ["seagreen" if v > 0 else "firebrick" for v in chart_df["macd_hist"].fillna(0)]
+
+    addplots = [
+        mpf.make_addplot(chart_df["ema_8"], ax=price_ax, color="dodgerblue", width=1.1),
+        mpf.make_addplot(chart_df["ema_21"], ax=price_ax, color="darkorange", width=1.1),
+        mpf.make_addplot(chart_df["ma_200"], ax=price_ax, color="slategray", width=1.0, linestyle="--"),
+        mpf.make_addplot(chart_df["ma_360"], ax=price_ax, color="dimgray", width=1.0, linestyle=":"),
+        mpf.make_addplot(swing_hi, ax=price_ax, color="seagreen", width=0.8, linestyle=":"),
+        mpf.make_addplot(swing_lo, ax=price_ax, color="firebrick", width=0.8, linestyle=":"),
+        mpf.make_addplot(chart_df["er"], ax=er_ax, color="purple", width=1.2, ylabel="ER"),
+        mpf.make_addplot(er_threshold_line, ax=er_ax, color="crimson", width=0.9, linestyle="--"),
+        mpf.make_addplot(chart_df["macd_hist"], type="bar", ax=macd_ax, color=macd_colors, width=0.7, ylabel="MACD"),
+    ]
+
+    mpf.plot(
+        chart_df[["Open", "High", "Low", "Close", "Volume"]],
+        type="candle", ax=price_ax, style="yahoo", volume=False,
+        show_nontrading=False, addplot=addplots,
+    )
+
+    er_ax.axhspan(PARAMS["er_threshold"], 1.0, color="seagreen", alpha=0.08)
+    er_ax.set_ylim(0, 1)
+    macd_ax.axhline(0, color="gray", linewidth=0.6)
+
+    # mplfinance only date-formats the ax it draws candles into (price_ax) -
+    # er_ax/macd_ax get plain 0..N integer ticks by default even though their
+    # data lines up with price_ax bar-for-bar. Force a draw so price_ax's tick
+    # labels are actually computed, then copy them onto the bottom panel and
+    # hide the redundant copies above it, so only one (correct) date axis shows.
+    price_ax.figure.canvas.draw()
+    date_ticks = price_ax.get_xticks()
+    date_labels = [t.get_text() for t in price_ax.get_xticklabels()]
+    price_ax.tick_params(labelbottom=False)
+    er_ax.set_xlim(price_ax.get_xlim())
+    er_ax.tick_params(labelbottom=False)
+    macd_ax.set_xlim(price_ax.get_xlim())
+    macd_ax.set_xticks(date_ticks)
+    macd_ax.set_xticklabels(date_labels, rotation=45, ha="right", fontsize=8)
+
+    title_color = "crimson" if info["cooldown"] else ("seagreen" if info["regime"] == "TRENDING" else "gray")
+    price_ax.set_title(
+        f"{symbol_key} ({timeframe})  close={info['close']:.2f}  ER={info['er']:.2f} "
+        f"[{info['regime']}]  bias={info['bias']}  breaker={'COOLDOWN' if info['cooldown'] else 'clear'}",
+        fontsize=10, loc="left", color=title_color,
+    )
+    return info
 
 
 def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None, mt5_path: str | None = None):
@@ -68,36 +145,34 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
     connect(path=mt5_path)
 
     symbols = list(SYMBOL_MAP.items())
+    n = len(symbols)
+
     plt.ion()
-    fig, axes = plt.subplots(len(symbols), 1, figsize=(11, 4.2 * len(symbols)))
-    if len(symbols) == 1:
-        axes = [axes]
+    fig, axgrid = plt.subplots(
+        nrows=3, ncols=n, figsize=(8 * n, 8.5),
+        gridspec_kw={"height_ratios": [3, 1, 1]},
+    )
+    if n == 1:
+        axgrid = axgrid.reshape(3, 1)
+    try:
+        fig.canvas.manager.set_window_title("us30-trading-bot — live monitor")
+    except AttributeError:
+        pass  # backend doesn't support a custom window title - cosmetic only
+    plt.show(block=False)
 
     print(f"live_monitor: {tf} bars, refreshing every {refresh_seconds}s. Ctrl+C or close the window to stop.\n")
 
     try:
-        while True:
-            for ax, (symbol_key, symbol) in zip(axes, symbols):
-                ax.clear()
-                df = build_live_features(symbol, er_length=PARAMS.get("er_length", 20), timeframe=tf)
-                chart_df = df[["Open", "High", "Low", "Close", "Volume"]].tail(bars)
-
-                line, info = _status_line(symbol_key, symbol, df, tf)
-                print(line)
-
-                mpf.plot(chart_df, type="candle", ax=ax, style="yahoo", volume=False, show_nontrading=False)
-                title_color = "crimson" if info["cooldown"] else ("seagreen" if info["regime"] == "TRENDING" else "gray")
-                ax.set_title(
-                    f"{symbol_key} ({tf})  close={info['close']:.2f}  ER={info['er']:.2f} "
-                    f"[{info['regime']}]  bias={info['bias']}  "
-                    f"breaker={'COOLDOWN' if info['cooldown'] else 'clear'}",
-                    fontsize=10, loc="left", color=title_color,
-                )
+        while plt.fignum_exists(fig.number):
+            for col, (symbol_key, symbol) in enumerate(symbols):
+                price_ax, er_ax, macd_ax = axgrid[0, col], axgrid[1, col], axgrid[2, col]
+                _redraw_column(symbol_key, symbol, price_ax, er_ax, macd_ax, bars, tf)
+            fig.suptitle(f"Last refreshed {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}", fontsize=9, color="gray")
+            fig.tight_layout(rect=(0, 0, 1, 0.97))
+            fig.canvas.draw_idle()
             print()
-            fig.tight_layout()
-            fig.canvas.draw()
-            plt.pause(0.1)
-            time.sleep(refresh_seconds)
+            plt.pause(0.1)  # pumps GUI events so the window actually repaints
+            time.sleep(max(0, refresh_seconds - 0.1))
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
