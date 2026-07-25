@@ -148,6 +148,26 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
     active_xlim = prior_xlim if user_adjusted else default_xlim
     price_ax.set_xlim(active_xlim)
 
+    # mpf.plot() auto-scaled the y-axis to the FULL `chart_df` (bars=150
+    # by default), not just the ~18 candles now visible via xlim above -
+    # that's what actually made candles look flattened/stretched (wide
+    # slots, but a y-range sized for 150 bars' worth of movement, not 18).
+    # Re-fit y to only the bars actually in view, same idea on the MACD
+    # panel (ER stays fixed 0-1, already correct either way).
+    lo_idx = max(0, int(active_xlim[0]))
+    hi_idx = min(n_total, int(active_xlim[1]) + 2)
+    visible = chart_df.iloc[lo_idx:hi_idx]
+    if len(visible):
+        y_lo, y_hi = visible["Low"].min(), visible["High"].max()
+        y_pad = (y_hi - y_lo) * 0.08 or y_hi * 0.001
+        price_ax.set_ylim(y_lo - y_pad, y_hi + y_pad)
+
+        m_vals = visible["macd_hist"].dropna()
+        if len(m_vals):
+            m_lo, m_hi = min(0.0, m_vals.min()), max(0.0, m_vals.max())
+            m_pad = (m_hi - m_lo) * 0.15 or 1.0
+            macd_ax.set_ylim(m_lo - m_pad, m_hi + m_pad)
+
     # mplfinance only date-formats the ax it draws candles into (price_ax) -
     # er_ax/macd_ax get plain 0..N integer ticks by default even though their
     # data lines up with price_ax bar-for-bar. Force a draw so price_ax's tick
