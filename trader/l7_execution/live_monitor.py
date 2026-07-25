@@ -60,6 +60,7 @@ Close the window or Ctrl+C in the terminal to stop.
 """
 
 import argparse
+import logging
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -73,29 +74,53 @@ from . import (
 )
 from .run_scheduled import BIAS, TIMEFRAME, PARAMS, MAGIC
 
-# ---------------------------------------------------------------------
-# Look and feel - TradingView-ish dark palette. Edit these to retheme;
-# everything below reads from these constants rather than hardcoding
-# colors inline, so this is the one place to change.
-# ---------------------------------------------------------------------
-BG = "#131722"
-PANEL_EDGE = "#2a2e39"
-GRID = "#232734"
-TEXT = "#d1d4dc"
-TEXT_MUTED = "#787b86"
-UP = "#26a69a"
-DOWN = "#ef5350"
-EMA_FAST = "#2196f3"
-EMA_SLOW = "#ff9800"
-MA_MACRO_1 = "#9aa1b3"
-MA_MACRO_2 = "#6f7383"
-ER_LINE = "#ab47bc"
-ER_THRESH = "#ef5350"
-ACCENT_CYAN = "#39d0d8"  # header banner / "// TAG" captions - SCADA-style accent, separate from candle colors
+# Silences "findfont: Font family 'X' not found" - printed once per text
+# element per redraw (Rajdhani/Orbitron/Share Tech Mono aren't installed
+# system fonts yet, see HEADER_FONT/MONO below) via matplotlib's own
+# logger, not a real error - it already falls back correctly on its own.
+# Left noisy, this buries the one-line-per-symbol log this script is
+# also meant to leave behind. Installing the fonts doesn't need this
+# line removed - matplotlib just won't have anything to warn about then.
+logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
-MONO = ["Consolas", "Cascadia Mono", "DejaVu Sans Mono", "monospace"]
+# ---------------------------------------------------------------------
+# Look and feel - lifted directly from the user's own "Mini Digital
+# Twin" HMI palette (their :root CSS vars) rather than an approximation
+# of it. Mapped by role, not just by matching original position:
+#   their SETPOINT amber (dashed reference line)  -> ER_THRESH
+#   their LEVEL/PV blue (the live measured value)  -> EMA_FAST
+#   their PUMP-running green / FAULT red            -> UP / DOWN
+#   their DRAIN purple accent                       -> ER_LINE
+#   their header cyan                                -> ACCENT_CYAN
+# Edit these to retheme; everything below reads from these constants
+# rather than hardcoding colors inline, so this is the one place to change.
+# ---------------------------------------------------------------------
+BG = "#0a0d12"
+PANEL_EDGE = "#1e2d45"
+GRID = "#1e2d45"
+TEXT = "#c8d8f0"
+TEXT_MUTED = "#4a6080"
+UP = "#00e676"
+DOWN = "#ff1744"
+EMA_FAST = "#29b6f6"
+EMA_SLOW = "#7c4dff"
+MA_MACRO_1 = "#7c93b8"
+MA_MACRO_2 = "#4a6080"
+ER_LINE = "#ce93d8"
+ER_THRESH = "#ffab00"
+ACCENT_CYAN = "#00e5ff"  # header banner / "// TAG" captions
 
-plt.rcParams["font.family"] = ["Segoe UI", "DejaVu Sans", "Arial", "sans-serif"]
+# Their web fonts (Orbitron/Share Tech Mono/Rajdhani) aren't installed
+# system fonts, so matplotlib can't see them out of the box - falls back
+# to Segoe UI/Consolas below until/unless you install them (they're free
+# on Google Fonts; after installing, matplotlib picks them up on its next
+# font-cache rebuild, which can need a restart). HEADER_FONT tries
+# Orbitron first for the banner title specifically, since that's the
+# single most visible place it'd read as "their" font if installed.
+MONO = ["Share Tech Mono", "Consolas", "Cascadia Mono", "DejaVu Sans Mono", "monospace"]
+HEADER_FONT = ["Orbitron", "Segoe UI", "Arial", "sans-serif"]
+
+plt.rcParams["font.family"] = ["Rajdhani", "Segoe UI", "DejaVu Sans", "Arial", "sans-serif"]
 plt.rcParams["font.size"] = 9.5
 
 DASH_STYLE = mpf.make_mpf_style(
@@ -104,7 +129,7 @@ DASH_STYLE = mpf.make_mpf_style(
     facecolor=BG,
     edgecolor=PANEL_EDGE,
     figcolor=BG,
-    rc={"font.family": ["Segoe UI", "DejaVu Sans", "Arial", "sans-serif"], "text.color": TEXT},
+    rc={"font.family": ["Rajdhani", "Segoe UI", "DejaVu Sans", "Arial", "sans-serif"], "text.color": TEXT},
 )
 
 _LEGEND_HANDLES = [
@@ -302,7 +327,7 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
     # updated in place via set_text() each cycle - calling fig.text() again
     # in the loop would just keep stacking new overlapping text objects.
     fig.text(0.01, 0.975, "US30-TRADING-BOT  //  LIVE MONITOR", fontsize=12, fontweight="bold",
-             fontfamily=MONO, color=ACCENT_CYAN, ha="left", va="top")
+             fontfamily=HEADER_FONT, color=ACCENT_CYAN, ha="left", va="top")
     header_right = fig.text(0.99, 0.975, "", fontsize=9, fontfamily=MONO, color=UP, ha="right", va="top")
 
     plt.show(block=False)
