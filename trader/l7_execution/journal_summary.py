@@ -9,11 +9,17 @@ this journal in the first place (catching live drift from backtest
 assumptions early, not months in).
 
 Key-level context (2026-07-25): if an entry carries a "context" field
-(run_scheduled.py's KEY_LEVELS - e.g. GOLD's 4,180/3,958 discretionary
-invalidation levels), each trade line shows where price sat relative
-to that level at decision time, and each symbol block gets an
-above/below tally across the whole window - turns "I think it broke
-the shelf around Tuesday" into something you can actually check.
+(the key_levels this cycle read via manual_overrides.py - e.g. GOLD's
+4,180/3,958 discretionary invalidation levels), each trade line shows
+where price sat relative to that level at decision time, and each
+symbol block gets an above/below tally across the whole window - turns
+"I think it broke the shelf around Tuesday" into something you can
+actually check.
+
+Manual override change log (2026-07-26): prints every bias/pause/key-
+level change made via live_monitor.py's dashboard widgets (or a direct
+edit of data/manual_overrides.json) within the lookback window, before
+the per-symbol breakdown - see manual_overrides.py.
 
     (venv) PS> python -m trader.l7_execution.journal_summary
     (venv) PS> python -m trader.l7_execution.journal_summary --days 30
@@ -24,6 +30,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from .journal import read_entries
+from .manual_overrides import read_change_log
 
 
 def _context_str(ctx: dict) -> str:
@@ -40,10 +47,35 @@ def _context_str(ctx: dict) -> str:
     return ", ".join(bits)
 
 
+def _print_override_changes(days: int) -> None:
+    """
+    Manual bias/pause/key-level changes (2026-07-26) made via
+    live_monitor.py's dashboard widgets (or a direct edit of
+    data/manual_overrides.json) - printed separately from the journal
+    itself since these are config changes, not run_once() results.
+    Shown first, before the per-symbol trade/skip breakdown, since a
+    bias flip or pause toggle is usually the reason the numbers below
+    it look different from the week before.
+    """
+    log = read_change_log()
+    if not log:
+        return
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    recent = [e for e in log if datetime.fromisoformat(e["timestamp"]) >= cutoff]
+    if not recent:
+        return
+    print(f"=== Manual override changes ({len(recent)} in the last {days} day(s)) ===")
+    for e in recent:
+        print(f"  {e['timestamp']}: {e['symbol_key']} {e['field']}: {e['old']} -> {e['new']}")
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=int, default=7, help="lookback window (default 7, i.e. weekly)")
     args = parser.parse_args()
+
+    _print_override_changes(args.days)
 
     entries = read_entries()
     if not entries:

@@ -31,19 +31,34 @@ you haven't touched the view snap to the latest ~18 candles - once you
 manually pan or zoom, that view sticks through future refreshes instead
 of snapping back every cycle.
 
-Read-only: never calls place_trade() or run_once() - it's on its own
-refresh timer, independent of the scheduled trading cycle. Safe to
-leave open all day. The right-side panel (2026-07-25) is the same
-guarantee applied to account/position info: it only ever reads
-account_summary()/get_position_info() and writes text - equity/
-balance/margin plus, per symbol, direction/volume/entry/SL/TP/live P&L
-if this bot's magic number has something open, or "flat" if not. No
-buttons, no order entry - that's a deliberately separate, bigger
+Read-only about ORDERS: never calls place_trade() or run_once() - it's
+on its own refresh timer, independent of the scheduled trading cycle.
+Safe to leave open all day. No buttons, no order entry, no way to move
+money from this window - that's a deliberately separate, bigger
 decision (a real GUI framework, not matplotlib widgets) not taken here.
 
-BIAS/TIMEFRAME/PARAMS/MAGIC come from run_scheduled.py, not redefined
-here, so this always reflects whatever that script is actually
-configured to trade - edit your bias there, this picks it up.
+Right-side panel: top block (2026-07-25) is account/position readout -
+only ever reads account_summary()/get_position_info() and writes text
+(equity/balance/margin, and per symbol a one-line flat/direction+P&L
+summary). Below that (2026-07-26): clickable controls for the
+DISCRETIONARY layer only - bias (long/neutral/short radio buttons),
+an immediate pause toggle, and the two key-level text boxes. These
+write to data/manual_overrides.json (via manual_overrides.py) which
+run_scheduled.py reads fresh every cycle - so a click here changes
+what the NEXT scheduled cycle does, same as hand-editing that file
+used to, just without the edit. This is fundamentally different from
+order-entry buttons: BIAS/pause/key-levels can only ever mute, downsize,
+or skip a trade the mechanical strategy would otherwise take - none of
+them can place, size, or close a real order themselves, so a click here
+carries the same risk profile as editing a config file, not the risk
+profile of a trade button.
+
+TIMEFRAME/PARAMS/MAGIC come from run_scheduled.py, not redefined here,
+so this always reflects whatever that script is actually configured to
+trade. Bias/key-levels/pause come from manual_overrides.load_overrides()
+instead, read fresh each redraw - not from run_scheduled.py's module
+globals, since those no longer hold the live values (see run_scheduled.py's
+module docstring, "made live-editable 2026-07-25" section).
 
 If the window opens but stays blank: that's a matplotlib GUI backend
 issue on your machine, not this script's logic (the print log will
@@ -72,6 +87,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.widgets import RadioButtons, Button, TextBox
 import mplfinance as mpf
 
 from . import (
@@ -79,7 +95,8 @@ from . import (
     build_live_features, LiveCircuitBreaker, _swing_high, _swing_low,
     account_summary, get_position_info,
 )
-from .run_scheduled import BIAS, TIMEFRAME, PARAMS, MAGIC
+from .run_scheduled import TIMEFRAME, PARAMS, MAGIC
+from .manual_overrides import load_overrides, set_bias, set_key_level, set_paused_now
 
 # Silences "findfont: Font family 'X' not found" - printed once per text
 # element per redraw (Rajdhani/Orbitron/Share Tech Mono aren't installed
@@ -159,17 +176,20 @@ def _style_axes(ax):
     ax.yaxis.label.set_color(TEXT_MUTED)
 
 
-def _regime_info(symbol_key: str, symbol: str, df: pd.DataFrame, timeframe: str) -> dict:
+def _regime_info(symbol_key: str, symbol: str, df: pd.DataFrame, timeframe: str, bias: str | None) -> dict:
+    """`bias` is passed in (from manual_overrides.load_overrides(), read once per
+    redraw cycle in run()) rather than read here, so every column of a given
+    cycle sees the exact same override snapshot a click might have just changed."""
     row = df.iloc[-1]
     er = row["er"]
     trending = bool(er > PARAMS["er_threshold"]) if pd.notna(er) else False
     regime = "TRENDING" if trending else ("CHOP" if pd.notna(er) else "warming up")
-    bias = BIAS.get(symbol_key) or "neutral"
+    bias_label = bias or "neutral"
 
     breaker = LiveCircuitBreaker(symbol=symbol, magic=MAGIC, bar_seconds=TIMEFRAME_SECONDS[timeframe.upper()])
     cooldown = breaker.in_cooldown()
 
-    return {"close": row["Close"], "er": er, "regime": regime, "bias": bias, "cooldown": cooldown}
+    return {"close": row["Close"], "er": er, "regime": regime, "bias": bias_label, "cooldown": cooldown}
 
 
 def _log_line(symbol_key: str, info: dict) -> str:
@@ -180,13 +200,13 @@ def _log_line(symbol_key: str, info: dict) -> str:
 
 
 def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
-                    bars: int, timeframe: str, visible_bars: int, view_state: dict) -> dict:
+                    bars: int, timeframe: str, visible_bars: int, view_state: dict, bias: str | None) -> dict:
     df = build_live_features(symbol, er_length=PARAMS.get("er_length", 20), timeframe=timeframe)
     swing_hi = _swing_high(df["High"], PARAMS["swing_lookback"]).tail(bars)
     swing_lo = _swing_low(df["Low"], PARAMS["swing_lookback"]).tail(bars)
     chart_df = df.tail(bars)
 
-    info = _regime_info(symbol_key, symbol, df, timeframe)
+    info = _regime_info(symbol_key, symbol, df, timeframe, bias)
     print(_log_line(symbol_key, info))
 
     # Preserve manual pan/zoom across refreshes: compare the CURRENT view
@@ -294,17 +314,23 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
     return info
 
 
-PANEL_WIDTH_IN = 2.6  # fixed-width inches for the right-side account/P&L panel
+PANEL_WIDTH_IN = 3.4  # fixed-width inches for the right-side panel (info + controls)
+
+BIAS_OPTIONS = ["Long", "Neutral", "Short"]  # RadioButtons labels -> set_bias() value below
+_BIAS_LABEL_TO_VALUE = {"Long": "long", "Neutral": None, "Short": "short"}
+_BIAS_VALUE_TO_LABEL = {"long": "Long", None: "Neutral", "short": "Short"}
 
 
 def _draw_side_panel(ax, acct: dict | None, positions: dict) -> None:
     """
-    Read-only text readout - account equity/balance/margin, then per
-    symbol: direction/volume/entry/current/SL/TP/live P&L if this bot's
-    MAGIC has a position open on it, else "flat". Every value here comes
+    Read-only text readout - account equity/balance, then one compact
+    line per symbol (flat, or direction/volume/P&L). Every value comes
     straight from account_summary()/get_position_info() (themselves
     read-only mt5.account_info()/positions_get() wrappers) - no widgets,
     no callbacks, nothing that could place, modify, or close a trade.
+    Kept deliberately brief (unlike the first cut of this panel) - it
+    only owns the top slice of the side panel now; the bias/pause/
+    key-level controls below it (_build_controls) need the rest.
     """
     ax.clear()
     ax.set_facecolor(BG)
@@ -313,35 +339,173 @@ def _draw_side_panel(ax, acct: dict | None, positions: dict) -> None:
     for spine in ax.spines.values():
         spine.set_color(PANEL_EDGE)
 
-    y = [0.97]
+    y = [0.95]
 
-    def line(text, color=TEXT, size=8.7, bold=False, dy=0.042):
-        ax.text(0.07, y[0], text, transform=ax.transAxes, color=color, fontsize=size,
+    def line(text, color=TEXT, size=8.7, bold=False, dy=0.11):
+        ax.text(0.06, y[0], text, transform=ax.transAxes, color=color, fontsize=size,
                  fontfamily=MONO, fontweight=("bold" if bold else "normal"), va="top")
         y[0] -= dy
 
-    line("// ACCOUNT", ACCENT_CYAN, size=8.5, dy=0.06)
+    line("// ACCOUNT", ACCENT_CYAN, size=8.5, dy=0.15)
     if acct is None:
-        line("unavailable this cycle", TEXT_MUTED, dy=0.08)
+        line("unavailable this cycle", TEXT_MUTED, dy=0.15)
     else:
         line(f"equity   {acct['equity']:>12,.2f} {acct['currency']}")
-        line(f"balance  {acct['balance']:>12,.2f} {acct['currency']}")
-        line(f"margin   {acct['margin']:>12,.2f} {acct['currency']}", dy=0.08)
+        line(f"balance  {acct['balance']:>12,.2f} {acct['currency']}", dy=0.15)
 
     for symbol_key, pos in positions.items():
-        line(f"// {symbol_key}", ACCENT_CYAN, size=8.5, dy=0.06)
         if pos is None:
-            line("flat - no open position", TEXT_MUTED, dy=0.08)
+            line(f"{symbol_key:6s} flat", TEXT_MUTED)
             continue
         pnl_color = UP if pos["profit"] >= 0 else DOWN
         dir_color = UP if pos["direction"] == "long" else DOWN
-        line(f"{pos['direction'].upper():5s} vol={pos['volume']}", dir_color, bold=True)
-        line(f"entry   {pos['price_open']:.2f}")
-        line(f"price   {pos['price_current']:.2f}")
-        line(f"sl      {pos['sl']:.2f}" if pos["sl"] else "sl      -")
-        line(f"tp      {pos['tp']:.2f}" if pos["tp"] else "tp      -")
-        pct = f"  ({pos['pnl_pct'] * 100:+.2f}%)" if pos["pnl_pct"] is not None else ""
-        line(f"P&L     {pos['profit']:+,.2f}{pct}", pnl_color, bold=True, dy=0.08)
+        pct = f" ({pos['pnl_pct'] * 100:+.2f}%)" if pos["pnl_pct"] is not None else ""
+        ax.text(0.06, y[0], f"{symbol_key:6s} {pos['direction'].upper():5s}", transform=ax.transAxes,
+                 color=dir_color, fontsize=8.7, fontfamily=MONO, fontweight="bold", va="top")
+        y[0] -= 0.11
+        line(f"   vol={pos['volume']}  P&L {pos['profit']:+,.2f}{pct}", pnl_color)
+
+
+def _panel_rect(panel_left: float, panel_width: float, y_top: float, height: float, x_inset: float = 0.025):
+    """One [left, bottom, width, height] rect, in figure fraction, inset within the panel column."""
+    return [panel_left + x_inset, y_top - height, panel_width - 2 * x_inset, height]
+
+
+# Right-side panel vertical layout, in figure fraction - shared between
+# run()'s panel_ax (account/position text) and _build_controls() (bias/
+# pause/key-level widgets) so the two can't drift out of sync the way an
+# earlier version of this did (hardcoded numbers in both places disagreed
+# by enough for the controls' "// SYMBOL" label to overlap the text box's
+# bottom border).
+PANEL_TOP = 0.90
+PANEL_BOTTOM = 0.04
+TEXT_BLOCK_HEIGHT = 0.26
+CONTROL_BLOCK_HEIGHT = 0.26
+BLOCK_GAP = 0.03
+
+
+def _build_controls(fig, panel_left: float, panel_width: float, symbols: list[tuple[str, str]], y_top: float) -> dict:
+    """
+    Builds the bias/pause/key-level widgets ONCE (unlike price/ER/MACD,
+    these must NOT be recreated every redraw - matplotlib widgets lose
+    focus/typed state and their event bindings if torn down and rebuilt,
+    and there'd be no reason to anyway since only a click changes them).
+    Seeds each widget's initial state from manual_overrides.load_overrides()
+    at startup. Returns {symbol_key: {"radio": ..., "pause_btn": ..., "tb_up": ..., "tb_down": ...}}
+    - caller (run()) must keep this dict alive for the widgets to keep working.
+
+    Every callback here does exactly one thing: call the matching
+    manual_overrides.set_*() (which itself journals the change), then
+    update the clicked widget's own on-screen label/color so the click
+    reads back immediately instead of waiting for the next 60s redraw.
+    None of these touch price/ER/MACD axes, run_once(), or place_trade().
+    """
+    overrides = load_overrides()
+    controls = {}
+
+    for symbol_key, _symbol in symbols:
+        block_top = y_top
+        y_top -= (CONTROL_BLOCK_HEIGHT + BLOCK_GAP)
+
+        fig.text(panel_left + 0.025, block_top, f"// {symbol_key} — MANUAL OVERRIDE",
+                  fontsize=8, fontfamily=MONO, color=ACCENT_CYAN, ha="left", va="top")
+
+        cursor = block_top - 0.032  # clears the label row above before the first widget
+
+        radio_h = 0.10
+        radio_ax = fig.add_axes(_panel_rect(panel_left, panel_width, cursor, radio_h))
+        radio_ax.set_in_layout(False)
+        radio_ax.set_facecolor(BG)
+        for spine in radio_ax.spines.values():
+            spine.set_color(PANEL_EDGE)
+        current_bias_label = _BIAS_VALUE_TO_LABEL.get(overrides["bias"].get(symbol_key), "Neutral")
+        radio = RadioButtons(radio_ax, BIAS_OPTIONS, active=BIAS_OPTIONS.index(current_bias_label),
+                              activecolor=ACCENT_CYAN)
+        for lbl in radio.labels:
+            lbl.set_color(TEXT)
+            lbl.set_fontsize(8)
+            lbl.set_fontfamily(MONO)
+        radio.on_clicked(_make_bias_callback(symbol_key))
+        cursor -= (radio_h + 0.008)
+
+        pause_h = 0.032
+        pause_ax = fig.add_axes(_panel_rect(panel_left, panel_width, cursor, pause_h))
+        pause_ax.set_in_layout(False)
+        is_paused = overrides["paused_now"].get(symbol_key, False)
+        pause_btn = Button(pause_ax, "RESUME" if is_paused else "PAUSE NOW",
+                            color=(DOWN if is_paused else PANEL_EDGE), hovercolor=ACCENT_CYAN)
+        pause_btn.label.set_color(TEXT)
+        pause_btn.label.set_fontsize(8)
+        pause_btn.label.set_fontfamily(MONO)
+        pause_btn.on_clicked(_make_pause_callback(symbol_key, pause_btn))
+        cursor -= (pause_h + 0.008)
+
+        tb_h = 0.032
+        levels = overrides["key_levels"].get(symbol_key, {})
+        up_val = levels.get("invalidation_up")
+        tb_up_ax = fig.add_axes(_panel_rect(panel_left, panel_width, cursor, tb_h))
+        tb_up_ax.set_in_layout(False)
+        tb_up = TextBox(tb_up_ax, "inv-up  ", initial=("" if up_val is None else str(up_val)),
+                         color=BG, hovercolor=PANEL_EDGE, label_pad=0.02)
+        tb_up.label.set_color(TEXT_MUTED)
+        tb_up.label.set_fontsize(7.5)
+        tb_up.label.set_fontfamily(MONO)
+        tb_up.text_disp.set_color(TEXT)
+        tb_up.text_disp.set_fontfamily(MONO)
+        tb_up.on_submit(_make_key_level_callback(symbol_key, "invalidation_up", tb_up))
+        cursor -= (tb_h + 0.005)
+
+        down_val = levels.get("invalidation_down")
+        tb_down_ax = fig.add_axes(_panel_rect(panel_left, panel_width, cursor, tb_h))
+        tb_down_ax.set_in_layout(False)
+        tb_down = TextBox(tb_down_ax, "inv-dn  ", initial=("" if down_val is None else str(down_val)),
+                           color=BG, hovercolor=PANEL_EDGE, label_pad=0.02)
+        tb_down.label.set_color(TEXT_MUTED)
+        tb_down.label.set_fontsize(7.5)
+        tb_down.label.set_fontfamily(MONO)
+        tb_down.text_disp.set_color(TEXT)
+        tb_down.text_disp.set_fontfamily(MONO)
+        tb_down.on_submit(_make_key_level_callback(symbol_key, "invalidation_down", tb_down))
+
+        controls[symbol_key] = {"radio": radio, "pause_btn": pause_btn, "tb_up": tb_up, "tb_down": tb_down}
+
+    return controls
+
+
+def _make_bias_callback(symbol_key: str):
+    def _on_bias_clicked(label: str):
+        set_bias(symbol_key, _BIAS_LABEL_TO_VALUE[label])
+        print(f"  [override] {symbol_key} bias -> {label}")
+    return _on_bias_clicked
+
+
+def _make_pause_callback(symbol_key: str, button):
+    def _on_pause_clicked(_event):
+        now_paused = not load_overrides()["paused_now"].get(symbol_key, False)
+        set_paused_now(symbol_key, now_paused)
+        button.label.set_text("RESUME" if now_paused else "PAUSE NOW")
+        button.color = DOWN if now_paused else PANEL_EDGE
+        button.ax.set_facecolor(button.color)
+        button.ax.figure.canvas.draw_idle()
+        print(f"  [override] {symbol_key} paused_now -> {now_paused}")
+    return _on_pause_clicked
+
+
+def _make_key_level_callback(symbol_key: str, which: str, textbox):
+    def _on_submit(text: str):
+        text = text.strip()
+        if not text:
+            set_key_level(symbol_key, which, None)
+            print(f"  [override] {symbol_key} {which} -> cleared")
+            return
+        try:
+            value = float(text)
+        except ValueError:
+            print(f"  [override] {symbol_key} {which}: '{text}' isn't a number - ignored, box left as-is")
+            return
+        set_key_level(symbol_key, which, value)
+        print(f"  [override] {symbol_key} {which} -> {value}")
+    return _on_submit
 
 
 def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None,
@@ -374,15 +538,23 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
     except AttributeError:
         pass  # backend doesn't support a custom window title - cosmetic only
 
-    # Right-side account/P&L panel (2026-07-25) - a plain fig.add_axes() at
-    # a manually-computed rect rather than an extra subplots() column, so
-    # it lives outside the price/ER/MACD gridspec entirely and can't get
-    # reflowed by tight_layout()'s column-sizing logic. set_in_layout(False)
-    # keeps tight_layout() (called every redraw for the resize fix below)
-    # from trying to fit this axes at all - it's positioned once, here.
+    # Right-side panel (2026-07-25/26) - plain fig.add_axes() rects at
+    # manually-computed coords rather than an extra subplots() column, so
+    # this whole area lives outside the price/ER/MACD gridspec entirely
+    # and can't get reflowed by tight_layout()'s column-sizing logic.
+    # set_in_layout(False) on every one of these axes keeps tight_layout()
+    # (called every redraw for the resize fix below) from trying to fit
+    # them at all - they're positioned once, here. Top slice is the
+    # account/position text (redrawn every cycle, see _draw_side_panel);
+    # below that, one bias/pause/key-level control block per symbol
+    # (built once - see _build_controls's docstring for why those can't
+    # be torn down and rebuilt like the text above them).
     panel_left = grid_width_in / total_width_in + 0.01
-    panel_ax = fig.add_axes([panel_left, 0.04, 1 - panel_left - 0.015, 0.86])
+    panel_width = 1 - panel_left - 0.015
+    text_bottom = PANEL_TOP - TEXT_BLOCK_HEIGHT
+    panel_ax = fig.add_axes([panel_left, text_bottom, panel_width, TEXT_BLOCK_HEIGHT])
     panel_ax.set_in_layout(False)
+    controls = _build_controls(fig, panel_left, panel_width, symbols, y_top=text_bottom - BLOCK_GAP)
 
     HEADER_RECT = (0, 0, grid_width_in / total_width_in, 0.93)  # tight_layout only owns the chart grid
 
@@ -412,9 +584,14 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
 
     try:
         while plt.fignum_exists(fig.number):
+            # One overrides read per cycle, shared by every column's title AND
+            # the panel - so a click that lands mid-cycle doesn't show a
+            # different bias in the chart title than what the panel just wrote.
+            cycle_bias = load_overrides()["bias"]
             for col, (symbol_key, symbol) in enumerate(symbols):
                 price_ax, er_ax, macd_ax = axgrid[0, col], axgrid[1, col], axgrid[2, col]
-                _redraw_column(symbol_key, symbol, price_ax, er_ax, macd_ax, bars, tf, visible_bars, view_state)
+                _redraw_column(symbol_key, symbol, price_ax, er_ax, macd_ax, bars, tf, visible_bars,
+                                view_state, cycle_bias.get(symbol_key))
 
             try:
                 acct = account_summary()

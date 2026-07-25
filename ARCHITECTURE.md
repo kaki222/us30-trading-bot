@@ -681,6 +681,81 @@ against synthetic OHLC data confirmed the panel doesn't distort or
 overlap the price/ER/MACD columns. Not yet run against a real MT5
 account or a real open position.
 
+### Clickable bias/pause/key-level controls (2026-07-26)
+
+You asked, after the read-only P&L panel: "shouldn't there be an
+inputbox with options that feeds back to the bot engine" for
+bias/key-levels/pause, instead of hand-editing run_scheduled.py's
+source every time. This is that - but scoped deliberately narrower
+than order-entry buttons (which you separately said to hold off on for
+the demo): bias/pause/key-levels can only ever mute, downsize, or skip
+a trade the mechanical strategy would otherwise take on its own -
+nothing here can place, size, or close a real order, so a click
+carries the same risk profile as editing a config file used to, not
+the risk profile of a trade button.
+
+- **`manual_overrides.py`** (new file) - `data/manual_overrides.json`
+  is now the live, shared state for `bias`/`key_levels`/`paused_now`
+  per symbol. `load_overrides()` reads it (seeding it with the old
+  hardcoded defaults the first time it doesn't exist);
+  `set_bias()`/`set_key_level()`/`set_paused_now()` write it via an
+  atomic `os.replace()` and append one line to
+  `data/manual_overrides_log.jsonl` (timestamp, field, symbol, old,
+  new) - an audit trail for this config the same way `journal.py` is
+  one for trade decisions. `PAUSE_WINDOWS` (the pre-set calendar dates)
+  deliberately stayed hardcoded in `run_scheduled.py` - it's dates, not
+  something worth a click; `paused_now` is the new immediate on/off
+  layered on top of it.
+- **`run_scheduled.py`** - `BIAS`/`KEY_LEVELS` module-level dicts are
+  gone; `main()` now calls `load_overrides()` fresh at the top of every
+  cycle instead. `_key_level_context()` takes `levels` as an argument
+  rather than reading a module global. `_in_pause_window()` (calendar
+  dates) and the new `paused_now` check are both applied - either one
+  skips the symbol, journaled with the matching reason
+  ("manual_pause_window" or "paused_now").
+- **`live_monitor.py`** - the right-side panel now has, below the
+  read-only account/position text, one control block per symbol built
+  ONCE at startup (`_build_controls()` - unlike the price/ER/MACD
+  panels, these can't be torn down and rebuilt every redraw without
+  losing typed/focus state): `RadioButtons` for bias (Long/Neutral/
+  Short), a `Button` that toggles `paused_now` and relabels itself
+  PAUSE NOW ↔ RESUME immediately on click, and two `TextBox`es for the
+  invalidation-up/down key levels. Every callback does exactly one
+  thing - call the matching `manual_overrides.set_*()` - then updates
+  its own on-screen state so the click reads back without waiting for
+  the next 60s redraw. The price panel title's `bias=` now comes from
+  `load_overrides()` read once per redraw cycle (shared with the
+  panel), not a stale module-level import.
+- **`journal_summary.py`** - prints every override change in the
+  lookback window (`_print_override_changes()`, reading
+  `manual_overrides.read_change_log()`) before the per-symbol trade/
+  skip breakdown, since a bias flip or pause toggle is usually why the
+  numbers below it look different from the week before.
+
+**Verified**: `manual_overrides.py`'s load/save/set_* functions and
+atomic-write behavior tested directly against a scratch directory
+(seeding, round-trip, no-op suppression when a value doesn't change,
+change-log entries, final-file-is-valid-JSON check).
+`run_scheduled.py`'s `main()` re-tested end-to-end with `paused_now`
+set via `manual_overrides` (mocked MT5 calls) - confirmed GOLD's
+`run_once()`/`build_live_features()` were never called while
+`paused_now` was set, and the journal entry still carried key-level
+context. `live_monitor.py`'s widget construction, callbacks, and full
+`run()` (one cycle, mocked MT5 + synthetic OHLC data) all rendered to
+PNG without error or overlap. The core round-trip was verified two
+ways in one script: (1) called `controls["GOLD"]["radio"].set_active(0)`
+- matplotlib's own internal method a real click invokes, not my
+callback function directly - and confirmed `manual_overrides.json`
+updated; (2) ran a second `_redraw_column()` cycle afterward and
+confirmed the price panel's title changed from `bias=neutral` to
+`bias=long`, proving a dashboard click actually reaches the next
+redraw. Combined with the `run_scheduled.py` test above, both halves
+of "a click reaches the bot" are verified (dashboard → file, and file →
+next scheduled cycle) - just not against a live MT5 terminal yet, and
+not with a real mouse click through the actual GUI (only via the
+widgets' own programmatic entry points, which is what a real click
+calls internally).
+
 **Windows Task Scheduler setup** (not the chosen path - see decision
 above - kept here only in case the unattended version is wanted later;
 do this yourself, I have no presence on your machine to do it for you,
