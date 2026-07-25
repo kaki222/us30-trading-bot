@@ -91,6 +91,9 @@ MA_MACRO_1 = "#9aa1b3"
 MA_MACRO_2 = "#6f7383"
 ER_LINE = "#ab47bc"
 ER_THRESH = "#ef5350"
+ACCENT_CYAN = "#39d0d8"  # header banner / "// TAG" captions - SCADA-style accent, separate from candle colors
+
+MONO = ["Consolas", "Cascadia Mono", "DejaVu Sans Mono", "monospace"]
 
 plt.rcParams["font.family"] = ["Segoe UI", "DejaVu Sans", "Arial", "sans-serif"]
 plt.rcParams["font.size"] = 9.5
@@ -198,6 +201,14 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
     er_ax.set_ylim(0, 1)
     macd_ax.axhline(0, color=TEXT_MUTED, linewidth=0.7)
 
+    # SCADA-style panel captions (ax.text, not set_title, so they read as
+    # instrument labels rather than headings) - cleared with the rest of
+    # the axes every cycle by ax.clear() above, so no separate bookkeeping.
+    er_ax.text(0.005, 1.06, "// ER — REGIME GATE", transform=er_ax.transAxes,
+               fontsize=7.5, fontfamily=MONO, color=ACCENT_CYAN, ha="left", va="bottom")
+    macd_ax.text(0.005, 1.06, "// MACD — MOMENTUM", transform=macd_ax.transAxes,
+                 fontsize=7.5, fontfamily=MONO, color=ACCENT_CYAN, ha="left", va="bottom")
+
     # Default view: latest `visible_bars` candles, not the full `bars`
     # window mpf.plot laid out - the rest is still there, just scrolled
     # out until you pan/zoom to it.
@@ -273,15 +284,27 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
     except AttributeError:
         pass  # backend doesn't support a custom window title - cosmetic only
 
+    HEADER_RECT = (0, 0, 1, 0.93)  # leaves room for the two-line banner below
+
     def _on_resize(_event):
         # Without this, resizing/snapping the window only re-flows text
         # and axes at the NEXT scheduled data refresh (up to refresh_seconds
         # away), so it looks broken/off-scale in between. Re-fitting on the
         # resize event itself makes it correct immediately instead.
-        fig.tight_layout(rect=(0, 0, 1, 0.97))
+        fig.tight_layout(rect=HEADER_RECT)
         fig.canvas.draw_idle()
 
     fig.canvas.mpl_connect("resize_event", _on_resize)
+
+    # SCADA-style header banner: static title left, live connection/clock
+    # right. fig.text() has no built-in "replace the last one" behavior
+    # like fig.suptitle() does, so the right side is created once here and
+    # updated in place via set_text() each cycle - calling fig.text() again
+    # in the loop would just keep stacking new overlapping text objects.
+    fig.text(0.01, 0.975, "US30-TRADING-BOT  //  LIVE MONITOR", fontsize=12, fontweight="bold",
+             fontfamily=MONO, color=ACCENT_CYAN, ha="left", va="top")
+    header_right = fig.text(0.99, 0.975, "", fontsize=9, fontfamily=MONO, color=UP, ha="right", va="top")
+
     plt.show(block=False)
 
     print(f"live_monitor: {tf}, {visible_bars} candles visible by default ({bars} available - pan/zoom to see "
@@ -292,9 +315,8 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
             for col, (symbol_key, symbol) in enumerate(symbols):
                 price_ax, er_ax, macd_ax = axgrid[0, col], axgrid[1, col], axgrid[2, col]
                 _redraw_column(symbol_key, symbol, price_ax, er_ax, macd_ax, bars, tf, visible_bars, view_state)
-            fig.suptitle(f"Last refreshed {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
-                         fontsize=9, color=TEXT_MUTED)
-            fig.tight_layout(rect=(0, 0, 1, 0.97))
+            header_right.set_text(f"● MT5 LIVE   {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            fig.tight_layout(rect=HEADER_RECT)
             fig.canvas.draw_idle()
             print()
             _wait_responsively(fig, refresh_seconds)
