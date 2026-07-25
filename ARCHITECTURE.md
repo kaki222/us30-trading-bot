@@ -532,6 +532,56 @@ end, not just sandbox-simulated. What's left isn't more code, it's
 time: run it periodically (manually, per the decision above) and let a
 real week of entries accumulate before the weekly review means anything.
 
+### Manual bias override + live monitor (2026-07-25)
+
+Grew out of a live discretionary GOLD chart read (Elliott/Wyckoff,
+worked through in chat, not in this repo) that landed on a genuine
+either/or: price either clears the ~4,164-4,180 shelf and keeps going
+(bullish), or fails there and eventually sweeps the ~3,958 low first
+(bearish). The mechanical strategy has no concept of that kind of
+discretionary read — it only sees ER/EMA/MACD/BOS. Two additions
+bridge the two without touching the strategy's actual rules:
+
+- `run_scheduled.py`'s `BIAS` dict — set `BIAS[symbol_key]` to `"long"`
+  or `"short"` from your own chart read; leave `None` (the default) to
+  let the mechanical signal run untouched, same as before this change.
+  `_preview_signal()` peeks at what `evaluate_regime_confluence_signal()`
+  would return this cycle — read-only, no position/breaker checks, no
+  order — purely to compare its direction against `BIAS`. If they
+  agree, or there's no signal, nothing changes. If they fight,
+  `BIAS_MODE` decides: `"mute"` (default) skips the trade and journals
+  why (`reason: "bias_override(bias=..., signal=...)"`); `"downsize"`
+  still takes it at `BIAS_DOWNSIZE_FACTOR` (default 0.5) × risk_pct.
+  Neither mode edits `l4_signal_model.py` or
+  `evaluate_regime_confluence_signal()` — the strategy stays exactly
+  as walk-forward-tested; the override lives entirely in the
+  orchestration script. **Verified**: mocked `run_once`/`_preview_signal`/
+  `append_entry` in the sandbox and exercised both modes directly —
+  mute correctly skipped and journaled the fighting symbol while
+  letting the unbiased one trade normally; downsize correctly halved
+  `risk_pct` on both symbols and still called `run_once`. Not yet run
+  against real MT5 data with a live bias set (both default to `None`
+  right now).
+- `live_monitor.py` — read-only desktop dashboard, no relation to the
+  trading cycle's timer. On its own refresh loop (default 60s) it pulls
+  live bars per symbol via the same `build_live_features()` `run_once()`
+  uses, plots a live-updating `mplfinance` candlestick chart per
+  instrument, and titles each chart with close price, current
+  Efficiency Ratio, TRENDING/CHOP classification, the symbol's `BIAS`
+  (imported straight from `run_scheduled.py`, so the two scripts can't
+  drift apart), and the circuit breaker's live cooldown status. Same
+  info also prints as a one-line log per symbol per cycle, so there's a
+  plain-text record even with the window closed. Needs
+  `pip install mplfinance` (added to `requirements.txt`). **Verified**:
+  `_status_line()` exercised against a synthetic OHLC+ER DataFrame with
+  a stubbed circuit breaker (correct TRENDING/CHOP/bias/cooldown
+  readout), and the `mpf.plot(..., ax=ax, ...)` external-axes call
+  exercised directly with synthetic bars — rendered and saved without
+  error. Not yet run against a real MT5 feed.
+
+    (venv) PS> python -m trader.l7_execution.live_monitor "C:\path\to\terminal64.exe"
+    (venv) PS> python -m trader.l7_execution.live_monitor --refresh 30 --bars 150 --timeframe H1
+
 **Windows Task Scheduler setup** (not the chosen path - see decision
 above - kept here only in case the unattended version is wanted later;
 do this yourself, I have no presence on your machine to do it for you,
