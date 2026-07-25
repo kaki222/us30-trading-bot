@@ -5,7 +5,8 @@ a column per instrument, each with three stacked panels:
      entry rule checks — EMA8/EMA21 (trend cross), MA200/MA360 (macro
      trend filter), and the rolling swing-high/low levels price has to
      break for a BOS entry. If it's not one of these, it isn't part of
-     why the bot would or wouldn't fire here.
+     why the bot would or wouldn't fire here. A small legend on the
+     price panel says which line is which.
   2. Efficiency Ratio over time, with the er_threshold line and the
      "tradeable trend" zone shaded — the regime gate, visible as a
      history instead of a single instantaneous number.
@@ -16,6 +17,11 @@ your BIAS (from run_scheduled.py), and circuit-breaker cooldown status,
 color-coded. The same info also prints as a one-line log per symbol
 per cycle, so there's a plain-text record even with the window closed.
 
+Dark theme (TradingView-ish palette) - built once as DASH_STYLE below
+and reapplied every redraw, since ax.clear() resets an axes' facecolor
+back to matplotlib's default each cycle. Change the color constants
+near the top of this file to retheme it.
+
 Default view is the most recent ~18 candles (--visible-bars to change).
 A wider window (--bars, default 150) is still fetched and plotted
 underneath that - use the toolbar's Pan/Zoom buttons (the hand and
@@ -23,9 +29,7 @@ magnifying-glass icons) or scroll out to see it. Panning/zooming is
 preserved across refreshes: only the FIRST draw and any refresh where
 you haven't touched the view snap to the latest ~18 candles - once you
 manually pan or zoom, that view sticks through future refreshes instead
-of snapping back every cycle, which is what made panning feel broken
-before this was added (the whole point of the live-refresh window was
-being overridden every ~60s before you could look at anything).
+of snapping back every cycle.
 
 Read-only: never calls place_trade() or run_once() - it's on its own
 refresh timer, independent of the scheduled trading cycle. Safe to
@@ -52,7 +56,7 @@ Close the window or Ctrl+C in the terminal to stop.
     (venv) PS> python -m trader.l7_execution.live_monitor "C:\\path\\to\\terminal64.exe"
     (venv) PS> python -m trader.l7_execution.live_monitor --refresh 30 --bars 150
     (venv) PS> python -m trader.l7_execution.live_monitor --timeframe H1
-    (venv) PS> python -m trader.l7_execution.live_monitor --visible-bars 20
+    (venv) PS> python -m trader.l7_execution.live_monitor --visible-bars 50
 """
 
 import argparse
@@ -60,6 +64,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import mplfinance as mpf
 
 from . import (
@@ -67,6 +72,56 @@ from . import (
     build_live_features, LiveCircuitBreaker, _swing_high, _swing_low,
 )
 from .run_scheduled import BIAS, TIMEFRAME, PARAMS, MAGIC
+
+# ---------------------------------------------------------------------
+# Look and feel - TradingView-ish dark palette. Edit these to retheme;
+# everything below reads from these constants rather than hardcoding
+# colors inline, so this is the one place to change.
+# ---------------------------------------------------------------------
+BG = "#131722"
+PANEL_EDGE = "#2a2e39"
+GRID = "#232734"
+TEXT = "#d1d4dc"
+TEXT_MUTED = "#787b86"
+UP = "#26a69a"
+DOWN = "#ef5350"
+EMA_FAST = "#2196f3"
+EMA_SLOW = "#ff9800"
+MA_MACRO_1 = "#9aa1b3"
+MA_MACRO_2 = "#6f7383"
+ER_LINE = "#ab47bc"
+ER_THRESH = "#ef5350"
+
+plt.rcParams["font.family"] = ["Segoe UI", "DejaVu Sans", "Arial", "sans-serif"]
+plt.rcParams["font.size"] = 9.5
+
+DASH_STYLE = mpf.make_mpf_style(
+    base_mpl_style="dark_background",
+    marketcolors=mpf.make_marketcolors(up=UP, down=DOWN, edge="inherit", wick="inherit", volume="inherit"),
+    facecolor=BG,
+    edgecolor=PANEL_EDGE,
+    figcolor=BG,
+    rc={"font.family": ["Segoe UI", "DejaVu Sans", "Arial", "sans-serif"], "text.color": TEXT},
+)
+
+_LEGEND_HANDLES = [
+    Line2D([0], [0], color=EMA_FAST, lw=1.2, label="EMA8"),
+    Line2D([0], [0], color=EMA_SLOW, lw=1.2, label="EMA21"),
+    Line2D([0], [0], color=MA_MACRO_1, lw=1.0, linestyle="--", label="MA200"),
+    Line2D([0], [0], color=MA_MACRO_2, lw=1.0, linestyle=":", label="MA360"),
+    Line2D([0], [0], color=UP, lw=0.9, linestyle=":", label="swing hi/lo"),
+]
+
+
+def _style_axes(ax):
+    """Reapply the dark theme to one axes - needed every cycle since ax.clear() resets facecolor/spines/grid."""
+    ax.set_facecolor(BG)
+    for spine in ax.spines.values():
+        spine.set_color(PANEL_EDGE)
+    ax.tick_params(colors=TEXT_MUTED, labelsize=8.5)
+    ax.grid(True, color=GRID, linewidth=0.7, alpha=0.8)
+    ax.set_axisbelow(True)
+    ax.yaxis.label.set_color(TEXT_MUTED)
 
 
 def _regime_info(symbol_key: str, symbol: str, df: pd.DataFrame, timeframe: str) -> dict:
@@ -113,31 +168,35 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
 
     for ax in (price_ax, er_ax, macd_ax):
         ax.clear()
+        _style_axes(ax)
 
     er_threshold_line = pd.Series(PARAMS["er_threshold"], index=chart_df.index)
-    macd_colors = ["seagreen" if v > 0 else "firebrick" for v in chart_df["macd_hist"].fillna(0)]
+    macd_colors = [UP if v > 0 else DOWN for v in chart_df["macd_hist"].fillna(0)]
 
     addplots = [
-        mpf.make_addplot(chart_df["ema_8"], ax=price_ax, color="dodgerblue", width=1.1),
-        mpf.make_addplot(chart_df["ema_21"], ax=price_ax, color="darkorange", width=1.1),
-        mpf.make_addplot(chart_df["ma_200"], ax=price_ax, color="slategray", width=1.0, linestyle="--"),
-        mpf.make_addplot(chart_df["ma_360"], ax=price_ax, color="dimgray", width=1.0, linestyle=":"),
-        mpf.make_addplot(swing_hi, ax=price_ax, color="seagreen", width=0.8, linestyle=":"),
-        mpf.make_addplot(swing_lo, ax=price_ax, color="firebrick", width=0.8, linestyle=":"),
-        mpf.make_addplot(chart_df["er"], ax=er_ax, color="purple", width=1.2, ylabel="ER"),
-        mpf.make_addplot(er_threshold_line, ax=er_ax, color="crimson", width=0.9, linestyle="--"),
+        mpf.make_addplot(chart_df["ema_8"], ax=price_ax, color=EMA_FAST, width=1.2),
+        mpf.make_addplot(chart_df["ema_21"], ax=price_ax, color=EMA_SLOW, width=1.2),
+        mpf.make_addplot(chart_df["ma_200"], ax=price_ax, color=MA_MACRO_1, width=1.0, linestyle="--"),
+        mpf.make_addplot(chart_df["ma_360"], ax=price_ax, color=MA_MACRO_2, width=1.0, linestyle=":"),
+        mpf.make_addplot(swing_hi, ax=price_ax, color=UP, width=0.8, linestyle=":"),
+        mpf.make_addplot(swing_lo, ax=price_ax, color=DOWN, width=0.8, linestyle=":"),
+        mpf.make_addplot(chart_df["er"], ax=er_ax, color=ER_LINE, width=1.3, ylabel="ER"),
+        mpf.make_addplot(er_threshold_line, ax=er_ax, color=ER_THRESH, width=0.9, linestyle="--"),
         mpf.make_addplot(chart_df["macd_hist"], type="bar", ax=macd_ax, color=macd_colors, width=0.7, ylabel="MACD"),
     ]
 
     mpf.plot(
         chart_df[["Open", "High", "Low", "Close", "Volume"]],
-        type="candle", ax=price_ax, style="yahoo", volume=False,
+        type="candle", ax=price_ax, style=DASH_STYLE, volume=False,
         show_nontrading=False, addplot=addplots,
     )
 
-    er_ax.axhspan(PARAMS["er_threshold"], 1.0, color="seagreen", alpha=0.08)
+    price_ax.legend(handles=_LEGEND_HANDLES, loc="upper left", fontsize=7,
+                     framealpha=0.35, facecolor=BG, edgecolor=PANEL_EDGE, labelcolor=TEXT_MUTED)
+
+    er_ax.axhspan(PARAMS["er_threshold"], 1.0, color=UP, alpha=0.10)
     er_ax.set_ylim(0, 1)
-    macd_ax.axhline(0, color="gray", linewidth=0.6)
+    macd_ax.axhline(0, color=TEXT_MUTED, linewidth=0.7)
 
     # Default view: latest `visible_bars` candles, not the full `bars`
     # window mpf.plot laid out - the rest is still there, just scrolled
@@ -181,13 +240,13 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
     er_ax.tick_params(labelbottom=False)
     macd_ax.set_xlim(active_xlim)
     macd_ax.set_xticks(date_ticks)
-    macd_ax.set_xticklabels(date_labels, rotation=45, ha="right", fontsize=8)
+    macd_ax.set_xticklabels(date_labels, rotation=45, ha="right", fontsize=8, color=TEXT_MUTED)
 
-    title_color = "crimson" if info["cooldown"] else ("seagreen" if info["regime"] == "TRENDING" else "gray")
+    title_color = DOWN if info["cooldown"] else (UP if info["regime"] == "TRENDING" else TEXT_MUTED)
     price_ax.set_title(
         f"{symbol_key} ({timeframe})  close={info['close']:.2f}  ER={info['er']:.2f} "
         f"[{info['regime']}]  bias={info['bias']}  breaker={'COOLDOWN' if info['cooldown'] else 'clear'}",
-        fontsize=10, loc="left", color=title_color,
+        fontsize=11, fontweight="bold", loc="left", color=title_color,
     )
     return info
 
@@ -206,6 +265,7 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
         nrows=3, ncols=n, figsize=(8 * n, 8.5),
         gridspec_kw={"height_ratios": [3, 1, 1]},
     )
+    fig.patch.set_facecolor(BG)
     if n == 1:
         axgrid = axgrid.reshape(3, 1)
     try:
@@ -232,7 +292,8 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
             for col, (symbol_key, symbol) in enumerate(symbols):
                 price_ax, er_ax, macd_ax = axgrid[0, col], axgrid[1, col], axgrid[2, col]
                 _redraw_column(symbol_key, symbol, price_ax, er_ax, macd_ax, bars, tf, visible_bars, view_state)
-            fig.suptitle(f"Last refreshed {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}", fontsize=9, color="gray")
+            fig.suptitle(f"Last refreshed {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+                         fontsize=9, color=TEXT_MUTED)
             fig.tight_layout(rect=(0, 0, 1, 0.97))
             fig.canvas.draw_idle()
             print()
