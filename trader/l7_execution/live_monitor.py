@@ -44,7 +44,6 @@ Close the window or Ctrl+C in the terminal to stop.
 """
 
 import argparse
-import time
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -171,12 +170,30 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
             fig.tight_layout(rect=(0, 0, 1, 0.97))
             fig.canvas.draw_idle()
             print()
-            plt.pause(0.1)  # pumps GUI events so the window actually repaints
-            time.sleep(max(0, refresh_seconds - 0.1))
+            _wait_responsively(fig, refresh_seconds)
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
         shutdown()
+
+
+def _wait_responsively(fig, seconds: float, step: float = 0.15):
+    """
+    Waits `seconds` between refreshes WITHOUT a plain time.sleep(). A
+    single long time.sleep() blocks Python entirely, so the window's
+    event loop never runs during that stretch and the window can't be
+    dragged, resized, or even redrawn by the OS for the whole interval -
+    it only looked "stuck" between the brief moments it happened to
+    wake up. plt.pause() is what actually processes those OS window
+    events, so looping it in small steps keeps the window responsive
+    the entire time it's waiting, not just right after a redraw.
+    """
+    elapsed = 0.0
+    while elapsed < seconds:
+        if not plt.fignum_exists(fig.number):
+            return
+        plt.pause(step)
+        elapsed += step
 
 
 def main():
