@@ -24,14 +24,27 @@ JOURNAL_PATH = Path(__file__).resolve().parents[2] / "data" / "journal.jsonl"
 
 
 def append_entry(symbol_key: str, timeframe: str, magic: int, result: dict,
-                  path: Path = JOURNAL_PATH) -> None:
-    """Append one run_once() result to the journal, tagged with when/what/which-account-role it was."""
+                  path: Path = JOURNAL_PATH, context: dict | None = None) -> None:
+    """
+    Append one run_once() result to the journal, tagged with when/what/
+    which-account-role it was.
+
+    `context` (2026-07-25) is a separate, optional field for discretionary
+    annotations that aren't part of the mechanical run_once() result at
+    all - right now that's run_scheduled.py's KEY_LEVELS (where price sat
+    relative to a manually-set invalidation level at decision time).
+    Kept as its own top-level key rather than merged into `result` so
+    the mechanical result stays exactly what run_once() actually
+    returned - `context` is purely for human review via
+    journal_summary.py, never read back by any trading logic.
+    """
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "symbol_key": symbol_key,
         "timeframe": timeframe,
         "magic": magic,
         "result": result,
+        "context": context or {},
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a") as f:

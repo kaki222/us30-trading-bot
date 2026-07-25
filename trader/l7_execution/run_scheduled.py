@@ -43,6 +43,24 @@ nothing changes. If they disagree, BIAS_MODE decides what happens:
 Either way it's logged in the journal so journal_summary.py shows when
 and why a bias override fired.
 
+Key-level logging (2026-07-25): KEY_LEVELS lets you record where price
+sat relative to a manually-set discretionary level (e.g. GOLD's
+4,180 upper-shelf/4,165-peak invalidation and 3,958 (v)/(C) low
+invalidation from the Elliott/Wyckoff read worked through in chat) on
+EVERY journal entry, whether or not that run led to a trade. This is
+observational only - it never gates or mutes anything (BIAS already
+does that job); it exists purely so journal_summary.py can show "was
+price above/below your shelf" alongside every decision after the fact,
+instead of the levels only ever living in your head or in chat history.
+
+Manual pause windows (2026-07-25): PAUSE_WINDOWS skips a symbol
+entirely - no bias check, no run_once() call at all - during a
+stretch you already expect to be noisy/whipsaw-prone (e.g. the spring
+scenario's predicted flush window), rather than relying on the circuit
+breaker, which only reacts AFTER it's already eaten a string of losses.
+Still journaled (reason "manual_pause_window") so it shows up in the
+weekly review like everything else.
+
 See live_monitor.py for a live desktop view of ER/regime per symbol -
 useful to have open alongside this while you're forming or watching a
 bias call.
@@ -51,9 +69,10 @@ bias call.
 """
 
 import sys
+from datetime import datetime, timezone
 
 from . import (
-    connect, shutdown, account_summary, run_once,
+    connect, shutdown, account_summary, run_once, get_live_bars,
     build_live_features, evaluate_regime_confluence_signal, SYMBOL_MAP,
 )
 from .journal import append_entry
@@ -77,6 +96,25 @@ BIAS = {
 BIAS_MODE = "mute"           # "mute" or "downsize"
 BIAS_DOWNSIZE_FACTOR = 0.5   # only used when BIAS_MODE == "downsize"
 
+# --- discretionary key levels, logged not enforced (see module docstring) --
+# From the 2026-07-25 GOLD Elliott/Wyckoff read: 4,180 sits just above
+# the (5) peak / HTF Creek retest (green-path invalidation-up - a clean
+# break-and-hold above here favors the new-trend read), 3,958 is the
+# (v)/(C) low (red-path invalidation-down - losing this confirms the
+# spring/failing-X read). Update these if/when the read changes.
+KEY_LEVELS = {
+    "US30": None,
+    "GOLD": {"invalidation_up": 4180.0, "invalidation_down": 3958.0},
+}
+
+# --- manual pause windows, logged AND enforced (see module docstring) --
+PAUSE_WINDOWS = {
+    "US30": [],
+    "GOLD": [
+        (datetime(2026, 8, 7, 0, 0, tzinfo=timezone.utc), datetime(2026, 8, 10, 23, 59, tzinfo=timezone.utc)),
+    ],
+}
+
 
 def _preview_signal(symbol_key: str) -> dict:
     """
@@ -98,6 +136,34 @@ def _preview_signal(symbol_key: str) -> dict:
     )
 
 
+def _key_level_context(symbol_key: str) -> dict | None:
+    """
+    Read-only annotation: where does the latest close sit relative to
+    your own KEY_LEVELS for this symbol? None if no levels are set.
+    One extra live_bars fetch (count=1) - cheap, and kept independent
+    of _preview_signal()/run_once() so this never has to change if
+    either of those does.
+    """
+    levels = KEY_LEVELS.get(symbol_key)
+    if not levels:
+        return None
+    symbol = SYMBOL_MAP[symbol_key]
+    bars = get_live_bars(symbol, timeframe=TIMEFRAME, count=1)
+    close = float(bars["close"].iloc[-1])
+    up, down = levels.get("invalidation_up"), levels.get("invalidation_down")
+    return {
+        "close": close,
+        "invalidation_up": up,
+        "invalidation_down": down,
+        "above_invalidation_up": (close > up) if up is not None else None,
+        "below_invalidation_down": (close < down) if down is not None else None,
+    }
+
+
+def _in_pause_window(symbol_key: str, now: datetime) -> bool:
+    return any(start <= now <= end for start, end in PAUSE_WINDOWS.get(symbol_key, []))
+
+
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else None
     connect(path=path)
@@ -105,7 +171,17 @@ def main():
     acct = account_summary()
     print(f"Connected: login={acct['login']} server={acct['server']} equity={acct['equity']}")
 
+    now = datetime.now(timezone.utc)
+
     for symbol_key in ["US30", "GOLD"]:
+        context = _key_level_context(symbol_key)
+
+        if _in_pause_window(symbol_key, now):
+            result = {"action": "skip", "reason": "manual_pause_window"}
+            append_entry(symbol_key, TIMEFRAME, MAGIC, result, context=context)
+            print(f"  {symbol_key}: skip (manual_pause_window)")
+            continue
+
         bias = BIAS.get(symbol_key)
         risk_pct = 0.01
 
@@ -115,7 +191,7 @@ def main():
 
             if fights_bias and BIAS_MODE == "mute":
                 result = {"action": "skip", "reason": f"bias_override(bias={bias}, signal={preview['signal']})"}
-                append_entry(symbol_key, TIMEFRAME, MAGIC, result)
+                append_entry(symbol_key, TIMEFRAME, MAGIC, result, context=context)
                 print(f"  {symbol_key}: skip (bias_override - {bias} bias vs {preview['signal']} signal)")
                 continue
 
@@ -130,9 +206,11 @@ def main():
             dry_run=True,  # see module docstring - deliberate, not a flag
             timeframe=TIMEFRAME,
         )
-        append_entry(symbol_key, TIMEFRAME, MAGIC, result)
+        append_entry(symbol_key, TIMEFRAME, MAGIC, result, context=context)
         print(f"  {symbol_key}: {result['action']}"
-              + (f" ({result.get('reason')})" if result["action"] == "skip" else f" - {result['signal']['signal']}"))
+              + (f" ({result.get('reason')})" if result["action"] == "skip" else f" - {result['signal']['signal']}")
+              + (f"  [close={context['close']:.2f} vs up={context['invalidation_up']} down={context['invalidation_down']}]"
+                 if context else ""))
 
     shutdown()
 

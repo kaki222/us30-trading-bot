@@ -582,6 +582,74 @@ bridge the two without touching the strategy's actual rules:
     (venv) PS> python -m trader.l7_execution.live_monitor "C:\path\to\terminal64.exe"
     (venv) PS> python -m trader.l7_execution.live_monitor --refresh 30 --bars 150 --timeframe H1
 
+### live_monitor.py dashboard rebuild + key-level/pause-window logging (2026-07-25)
+
+Same-day follow-on, in three parts, driven by using the dashboard live
+and finding the first version wasn't actually usable, plus closing the
+loop on two of the three items proposed when BIAS above first shipped.
+
+- **Dashboard rebuild.** The first cut was a static-looking single
+  price chart with no separate indicator view. Rebuilt to a 3-row-per-
+  symbol layout (price+overlays / ER "regime gate" / MACD "momentum"),
+  default 18-bar visible window (was showing the full 150-bar pull,
+  too zoomed out to read individual candles), dark SCADA/digital-twin
+  theme with colors and fonts matched directly to the user's own HMI
+  dashboard CSS (`#0a0d12` background, `#00e676`/`#ff1744` up/down,
+  Share Tech Mono / Orbitron / Rajdhani font stack), and a responsive
+  event loop (`_wait_responsively()` looping small `plt.pause()` calls
+  instead of one long `time.sleep()`) so the window no longer freezes
+  and can be dragged/resized mid-cycle. A `resize_event` callback
+  re-runs `tight_layout()` immediately instead of waiting for the next
+  60s data refresh. Y-axis on the price/MACD panels is now recomputed
+  from only the bars inside the active visible window each redraw
+  (previously `mpf.plot()` was auto-scaling to the full 150-bar
+  DataFrame regardless of the narrowed `xlim`, which flattened/
+  stretched the candles once zoomed to 18 bars).
+- **Cross-panel zoom sync fix.** Zooming/panning the price panel via
+  the matplotlib toolbar wasn't propagating to the ER/MACD panels below
+  it — the old code only copied `xlim` across panels once per 60s
+  redraw, so interactive zoom looked completely unsynced until the next
+  cycle caught up. Fixed at the root with `sharex="col"` on the
+  `plt.subplots()` call instead of manual `xlim` copying — matplotlib's
+  native axis-sharing propagates instantly and, confirmed by direct
+  test, survives the `ax.clear()` every redraw does each cycle.
+- **Key-level logging.** `run_scheduled.py`'s `KEY_LEVELS` dict (e.g.
+  GOLD's 4,180 invalidation-up / 3,958 invalidation-down from the
+  Elliott/Wyckoff read) is now recorded on every journal entry via
+  `_key_level_context()` — one extra `get_live_bars(count=1)` call,
+  kept independent of `_preview_signal()`/`run_once()`. Purely
+  observational: never gates or mutes anything (`BIAS` already owns
+  that job) — it exists so `journal_summary.py` can show "was price
+  above/below your shelf" alongside every decision after the fact.
+  `journal.py`'s `append_entry()` gained an optional `context` param,
+  kept as its own top-level JSON key rather than merged into `result`
+  so the mechanical result is untouched and no trading logic ever
+  reads it back.
+- **Manual pause windows.** `run_scheduled.py`'s `PAUSE_WINDOWS` dict
+  skips a symbol entirely (no bias check, no `run_once()` call at all)
+  during a stretch expected to be noisy/whipsaw-prone — first use is
+  GOLD's Aug 7-10 2026 window, the spring scenario's predicted flush
+  period. Distinct from the circuit breaker, which only reacts after
+  losses have already happened; this pre-empts a stretch already
+  expected to be bad rather than waiting to get hurt by it first.
+  Still journaled (`reason: "manual_pause_window"`), still shown in
+  `journal_summary.py`.
+
+**Verified**: all four changes tested via mocked calls / synthetic
+data in the sandbox — `_in_pause_window()` correct for GOLD inside/
+outside the window and US30 never paused; `_key_level_context()`
+returns the right dict for GOLD and `None` for US30; a full `main()`
+run with a mocked "now" inside the pause window correctly skipped
+GOLD's `run_once()` while still journaling context, and ran US30
+normally; `journal_summary.py`'s per-entry and per-symbol aggregate
+key-level output and the new `[PAUSED]` line checked against a
+synthetic journal file covering skip/trade/paused/no-context entries;
+the dashboard rebuild and sync fix rendered to PNG against synthetic
+OHLC data across several iterations and the `sharex` link tested
+directly for instant same-column propagation, cross-column
+independence, and survival through `ax.clear()`. None of this has run
+yet against a live MT5 feed or a real multi-hour dashboard session.
+
 **Windows Task Scheduler setup** (not the chosen path - see decision
 above - kept here only in case the unattended version is wanted later;
 do this yourself, I have no presence on your machine to do it for you,

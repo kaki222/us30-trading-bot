@@ -300,6 +300,12 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
     fig, axgrid = plt.subplots(
         nrows=3, ncols=n, figsize=(8 * n, 8.5),
         gridspec_kw={"height_ratios": [3, 1, 1]},
+        sharex="col",  # BUG FIX: without this, toolbar zoom/pan on price_ax only
+        # moved price_ax in real time - er_ax/macd_ax only caught up at the next
+        # scheduled redraw (up to refresh_seconds later), which is what "not
+        # synchronized at all" was. sharex makes matplotlib itself keep every
+        # axes in a column locked to the same x-range the instant any one of
+        # them changes, whether that's my code or your mouse doing it.
     )
     fig.patch.set_facecolor(BG)
     if n == 1:
