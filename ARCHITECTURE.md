@@ -650,6 +650,37 @@ directly for instant same-column propagation, cross-column
 independence, and survival through `ax.clear()`. None of this has run
 yet against a live MT5 feed or a real multi-hour dashboard session.
 
+### Right-side account/P&L panel (2026-07-25)
+
+Used the dashboard's previously-empty right margin for a read-only
+account/position readout, per your call to keep this demo display-only
+rather than adding clickable order-entry controls (a bigger, separate
+decision - matplotlib widgets are a poor fit for real order entry and
+it would need its own dry-run safety discipline built in deliberately).
+
+- `l7_execution/__init__.py`'s new `get_position_info(symbol, magic)` -
+  a read-only wrapper around `mt5.positions_get()`/`mt5.account_info()`,
+  returns direction/volume/entry/current price/SL/TP/profit/pnl_pct for
+  this bot's magic number on that symbol, or `None` if flat.
+- `live_monitor.py`'s `_draw_side_panel()` renders that alongside
+  `account_summary()` (equity/balance/margin) as plain monospace text a
+  fixed-width `fig.add_axes()` panel to the right of the existing
+  price/ER/MACD grid — positioned once outside the grid's own
+  `gridspec`/`tight_layout()` management (`set_in_layout(False)`) so it
+  can't get reflowed by the resize-fix's `tight_layout()` call.
+  Long positions/positive P&L render in the up-green, short/negative in
+  down-red, flat symbols show "flat - no open position" in muted text.
+  No buttons, no callbacks — same read-only guarantee as the rest of
+  this script.
+
+**Verified**: `_draw_side_panel()` rendered to PNG against synthetic
+account/position dicts (long position, short position, flat, and
+`account_summary()` unavailable) — correct color-coding and layout in
+all cases; the full 2-column chart grid + panel rendered together
+against synthetic OHLC data confirmed the panel doesn't distort or
+overlap the price/ER/MACD columns. Not yet run against a real MT5
+account or a real open position.
+
 **Windows Task Scheduler setup** (not the chosen path - see decision
 above - kept here only in case the unattended version is wanted later;
 do this yourself, I have no presence on your machine to do it for you,

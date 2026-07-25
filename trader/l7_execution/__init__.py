@@ -459,6 +459,39 @@ def has_open_position(symbol: str, magic: int) -> bool:
     return any(p.magic == magic for p in positions)
 
 
+def get_position_info(symbol: str, magic: int) -> dict | None:
+    """
+    Read-only snapshot of this bot's open position on `symbol`, if any -
+    for display (live_monitor.py's P&L panel), never for decisions.
+    Returns None if flat. `pnl_pct` is unrealized P&L as a fraction of
+    current equity (needs account_info(), so it's an extra call beyond
+    positions_get() - acceptable at a 60s dashboard refresh, not meant
+    for a tight loop).
+    """
+    positions = mt5.positions_get(symbol=symbol)
+    if not positions:
+        return None
+    pos = next((p for p in positions if p.magic == magic), None)
+    if pos is None:
+        return None
+
+    direction = "long" if pos.type == mt5.ORDER_TYPE_BUY else "short"
+    acct = mt5.account_info()
+    equity = acct.equity if acct is not None else None
+
+    return {
+        "ticket": pos.ticket,
+        "direction": direction,
+        "volume": pos.volume,
+        "price_open": pos.price_open,
+        "price_current": pos.price_current,
+        "sl": pos.sl,
+        "tp": pos.tp,
+        "profit": pos.profit,
+        "pnl_pct": (pos.profit / equity) if equity else None,
+    }
+
+
 def run_once(symbol_key: str, params: dict, risk_pct: float = 0.01, leverage: float = 30,
              magic: int = 100001, dry_run: bool = True, timeframe="H4") -> dict:
     """

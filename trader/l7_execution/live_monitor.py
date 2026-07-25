@@ -33,7 +33,13 @@ of snapping back every cycle.
 
 Read-only: never calls place_trade() or run_once() - it's on its own
 refresh timer, independent of the scheduled trading cycle. Safe to
-leave open all day.
+leave open all day. The right-side panel (2026-07-25) is the same
+guarantee applied to account/position info: it only ever reads
+account_summary()/get_position_info() and writes text - equity/
+balance/margin plus, per symbol, direction/volume/entry/SL/TP/live P&L
+if this bot's magic number has something open, or "flat" if not. No
+buttons, no order entry - that's a deliberately separate, bigger
+decision (a real GUI framework, not matplotlib widgets) not taken here.
 
 BIAS/TIMEFRAME/PARAMS/MAGIC come from run_scheduled.py, not redefined
 here, so this always reflects whatever that script is actually
@@ -71,6 +77,7 @@ import mplfinance as mpf
 from . import (
     connect, shutdown, SYMBOL_MAP, TIMEFRAME_SECONDS,
     build_live_features, LiveCircuitBreaker, _swing_high, _swing_low,
+    account_summary, get_position_info,
 )
 from .run_scheduled import BIAS, TIMEFRAME, PARAMS, MAGIC
 
@@ -287,6 +294,56 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
     return info
 
 
+PANEL_WIDTH_IN = 2.6  # fixed-width inches for the right-side account/P&L panel
+
+
+def _draw_side_panel(ax, acct: dict | None, positions: dict) -> None:
+    """
+    Read-only text readout - account equity/balance/margin, then per
+    symbol: direction/volume/entry/current/SL/TP/live P&L if this bot's
+    MAGIC has a position open on it, else "flat". Every value here comes
+    straight from account_summary()/get_position_info() (themselves
+    read-only mt5.account_info()/positions_get() wrappers) - no widgets,
+    no callbacks, nothing that could place, modify, or close a trade.
+    """
+    ax.clear()
+    ax.set_facecolor(BG)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_color(PANEL_EDGE)
+
+    y = [0.97]
+
+    def line(text, color=TEXT, size=8.7, bold=False, dy=0.042):
+        ax.text(0.07, y[0], text, transform=ax.transAxes, color=color, fontsize=size,
+                 fontfamily=MONO, fontweight=("bold" if bold else "normal"), va="top")
+        y[0] -= dy
+
+    line("// ACCOUNT", ACCENT_CYAN, size=8.5, dy=0.06)
+    if acct is None:
+        line("unavailable this cycle", TEXT_MUTED, dy=0.08)
+    else:
+        line(f"equity   {acct['equity']:>12,.2f} {acct['currency']}")
+        line(f"balance  {acct['balance']:>12,.2f} {acct['currency']}")
+        line(f"margin   {acct['margin']:>12,.2f} {acct['currency']}", dy=0.08)
+
+    for symbol_key, pos in positions.items():
+        line(f"// {symbol_key}", ACCENT_CYAN, size=8.5, dy=0.06)
+        if pos is None:
+            line("flat - no open position", TEXT_MUTED, dy=0.08)
+            continue
+        pnl_color = UP if pos["profit"] >= 0 else DOWN
+        dir_color = UP if pos["direction"] == "long" else DOWN
+        line(f"{pos['direction'].upper():5s} vol={pos['volume']}", dir_color, bold=True)
+        line(f"entry   {pos['price_open']:.2f}")
+        line(f"price   {pos['price_current']:.2f}")
+        line(f"sl      {pos['sl']:.2f}" if pos["sl"] else "sl      -")
+        line(f"tp      {pos['tp']:.2f}" if pos["tp"] else "tp      -")
+        pct = f"  ({pos['pnl_pct'] * 100:+.2f}%)" if pos["pnl_pct"] is not None else ""
+        line(f"P&L     {pos['profit']:+,.2f}{pct}", pnl_color, bold=True, dy=0.08)
+
+
 def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None,
         mt5_path: str | None = None, visible_bars: int = 18):
     tf = timeframe or TIMEFRAME
@@ -297,8 +354,10 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
     view_state: dict = {}  # symbol_key -> last default (latest-N) xlim, for pan/zoom preservation
 
     plt.ion()
+    grid_width_in = 8 * n
+    total_width_in = grid_width_in + PANEL_WIDTH_IN
     fig, axgrid = plt.subplots(
-        nrows=3, ncols=n, figsize=(8 * n, 8.5),
+        nrows=3, ncols=n, figsize=(total_width_in, 8.5),
         gridspec_kw={"height_ratios": [3, 1, 1]},
         sharex="col",  # BUG FIX: without this, toolbar zoom/pan on price_ax only
         # moved price_ax in real time - er_ax/macd_ax only caught up at the next
@@ -315,7 +374,17 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
     except AttributeError:
         pass  # backend doesn't support a custom window title - cosmetic only
 
-    HEADER_RECT = (0, 0, 1, 0.93)  # leaves room for the two-line banner below
+    # Right-side account/P&L panel (2026-07-25) - a plain fig.add_axes() at
+    # a manually-computed rect rather than an extra subplots() column, so
+    # it lives outside the price/ER/MACD gridspec entirely and can't get
+    # reflowed by tight_layout()'s column-sizing logic. set_in_layout(False)
+    # keeps tight_layout() (called every redraw for the resize fix below)
+    # from trying to fit this axes at all - it's positioned once, here.
+    panel_left = grid_width_in / total_width_in + 0.01
+    panel_ax = fig.add_axes([panel_left, 0.04, 1 - panel_left - 0.015, 0.86])
+    panel_ax.set_in_layout(False)
+
+    HEADER_RECT = (0, 0, grid_width_in / total_width_in, 0.93)  # tight_layout only owns the chart grid
 
     def _on_resize(_event):
         # Without this, resizing/snapping the window only re-flows text
@@ -346,6 +415,21 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
             for col, (symbol_key, symbol) in enumerate(symbols):
                 price_ax, er_ax, macd_ax = axgrid[0, col], axgrid[1, col], axgrid[2, col]
                 _redraw_column(symbol_key, symbol, price_ax, er_ax, macd_ax, bars, tf, visible_bars, view_state)
+
+            try:
+                acct = account_summary()
+            except RuntimeError as e:
+                acct = None
+                print(f"  [panel] account_summary() unavailable this cycle: {e}")
+            positions = {}
+            for symbol_key, symbol in symbols:
+                try:
+                    positions[symbol_key] = get_position_info(symbol, MAGIC)
+                except Exception as e:
+                    positions[symbol_key] = None
+                    print(f"  [panel] get_position_info({symbol_key}) unavailable this cycle: {e}")
+            _draw_side_panel(panel_ax, acct, positions)
+
             header_right.set_text(f"● MT5 LIVE   {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
             fig.tight_layout(rect=HEADER_RECT)
             fig.canvas.draw_idle()
