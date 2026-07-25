@@ -51,10 +51,21 @@ import matplotlib.pyplot as plt
 import mplfinance as mpf
 
 from . import (
-    connect, shutdown, SYMBOL_MAP, TIMEFRAME_SECONDS,
+    connect, shutdown, resolve_symbol, SYMBOL_MAP, TIMEFRAME_SECONDS,
     build_live_features, LiveCircuitBreaker, _swing_high, _swing_low,
 )
 from .run_scheduled import BIAS, TIMEFRAME, PARAMS, MAGIC
+
+# Extra instruments live_monitor can watch purely to see live movement -
+# these are NOT traded by run_scheduled.py and never touch BIAS or the
+# real SYMBOL_MAP (adding a symbol here doesn't make the bot trade it).
+# Candidate names are guesses, same as SYMBOL_MAP's own comment explains
+# brokers vary - resolve_symbol() finds whichever one is actually in
+# your Market Watch. Pass --extra btc,eth to add them for one run.
+WATCHLIST_CANDIDATES = {
+    "BTC": ["BTCUSD", "BTCUSDm", "BTCUSD.cash", "Bitcoin"],
+    "ETH": ["ETHUSD", "ETHUSDm", "ETHUSD.cash", "Ethereum"],
+}
 
 
 def _regime_info(symbol_key: str, symbol: str, df: pd.DataFrame, timeframe: str) -> dict:
@@ -139,11 +150,17 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
     return info
 
 
-def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None, mt5_path: str | None = None):
+def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None,
+        mt5_path: str | None = None, extra: list[str] | None = None):
     tf = timeframe or TIMEFRAME
     connect(path=mt5_path)
 
     symbols = list(SYMBOL_MAP.items())
+    for key in extra or []:
+        key = key.strip().upper()
+        if key not in WATCHLIST_CANDIDATES:
+            raise ValueError(f"--extra {key!r} not recognized. Known: {list(WATCHLIST_CANDIDATES)}")
+        symbols.append((key, resolve_symbol(WATCHLIST_CANDIDATES[key])))
     n = len(symbols)
 
     plt.ion()
@@ -157,6 +174,16 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
         fig.canvas.manager.set_window_title("us30-trading-bot — live monitor")
     except AttributeError:
         pass  # backend doesn't support a custom window title - cosmetic only
+
+    def _on_resize(_event):
+        # Without this, resizing/snapping the window only re-flows text
+        # and axes at the NEXT scheduled data refresh (up to refresh_seconds
+        # away), so it looks broken/off-scale in between. Re-fitting on the
+        # resize event itself makes it correct immediately instead.
+        fig.tight_layout(rect=(0, 0, 1, 0.97))
+        fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect("resize_event", _on_resize)
     plt.show(block=False)
 
     print(f"live_monitor: {tf} bars, refreshing every {refresh_seconds}s. Ctrl+C or close the window to stop.\n")
@@ -202,8 +229,13 @@ def main():
     parser.add_argument("--refresh", type=int, default=60, help="seconds between refreshes (default 60)")
     parser.add_argument("--bars", type=int, default=150, help="bars shown on each chart (default 150)")
     parser.add_argument("--timeframe", default=None, help="override run_scheduled.py's TIMEFRAME for this view only")
+    parser.add_argument("--extra", default=None,
+                         help=f"comma-separated watch-only symbols to add, not traded by the bot. "
+                              f"Known: {','.join(WATCHLIST_CANDIDATES)} (e.g. --extra btc,eth)")
     args = parser.parse_args()
-    run(refresh_seconds=args.refresh, bars=args.bars, timeframe=args.timeframe, mt5_path=args.mt5_path)
+    extra = args.extra.split(",") if args.extra else None
+    run(refresh_seconds=args.refresh, bars=args.bars, timeframe=args.timeframe,
+        mt5_path=args.mt5_path, extra=extra)
 
 
 if __name__ == "__main__":
