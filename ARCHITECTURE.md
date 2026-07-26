@@ -842,7 +842,7 @@ for Gold.
 
 ---
 
-## SMC zone/session gate — mined from external research, inconclusive so far (2026-07-26)
+## SMC zone/session gate — mined from external research, tested to a final verdict (2026-07-26)
 
 User granted access to a personal folder (`Journalling/`, outside this
 repo) of Smart Money Concepts (SMC) chart-journalling notebooks - LaTeX
@@ -921,6 +921,54 @@ number in this document) is the only way to give this a final verdict,
 and hasn't been run - the fixed-defaults signal so far didn't clearly
 justify the time cost (walk-forward over full history takes minutes per
 instrument, per the section above).
+
+**Full walk-forward optimization pass (2026-07-26, same day, later)** — the
+proper test flagged as missing above. No `optimize_kwargs` grid existed
+yet for this strategy family (`LiquiditySweepStrategy` had, until now,
+only ever been walk-forward tested with `optimize_kwargs=None` - fixed
+defaults, no per-fold tuning, unlike `ConfluenceStrategy`'s
+`REGIME_OPTIMIZE_KWARGS`). Defined one and ran real per-fold optimization
+- same anchored walk-forward harness, `Backtest.optimize()` re-fit every
+fold on the training slice only, applied out-of-sample - for **both**
+the baseline and the zone-gated variant, on both instruments, so the
+comparison is optimized-vs-optimized rather than the old fixed-defaults
+number against a newly-optimized one:
+
+```python
+BASE_GRID = dict(max_bars_to_bos=[6, 9, 12], max_pullback_bars=[8, 12, 16],
+                  target_rr=[1.5, 2.0, 2.5, 3.0], maximize="SQN")
+ZONE_GRID = dict(BASE_GRID, zone_lookback=[8, 15, 25])
+```
+
+Compounded return across all out-of-sample folds:
+- **US30**: baseline **-7.56%** (36 folds, 41 trades, 9/36 folds positive)
+  vs. zone-gated **-3.60%** (36 folds, only 7 trades total, 1/36 folds
+  positive). Both lose money once genuinely optimized - a separate
+  finding from the zone gate itself: the strategy's earlier
+  "fixed-defaults" numbers for US30 (+0.03%/+0.54% in the sections
+  above) don't survive real per-fold optimization at all. With roughly
+  1 trade per fold, SQN-based grid search on US30 has almost nothing to
+  generalize from and appears to be overfitting noise rather than
+  finding real structure - worth flagging as its own caveat, independent
+  of the SMC gate question.
+- **Gold**: baseline **+20.16%** (48 folds, 54 trades, 21/48 folds
+  positive, 41.4% avg win rate on traded folds) vs. zone-gated **-1.84%**
+  (48 folds, only 18 trades, 6/48 folds positive). The zone gate turns a
+  genuinely solid optimized baseline into a loser, while cutting trade
+  count by two-thirds.
+
+**Final verdict: the zone gate does not earn a place in production.** It
+never improves on its own baseline once both are optimized to the same
+standard, and on Gold - the one instrument where the baseline is real
+and profitable - it actively destroys the edge. This replaces
+"inconclusive" with a real answer; the decision below (off by default)
+doesn't change, it's now backed by a rigorous result instead of a quick
+fixed-defaults read. `SMCZoneConfluenceStrategy`/
+`SMCZoneLiquiditySweepStrategy` stay in the codebase as opt-in,
+documented dead ends - kept for the reusable feature code
+(`premium_discount_zone()`/`trading_session()`) and as a worked example
+of "mine an idea, test it properly, reject it cleanly," not for their
+own trading value.
 
 **Decision (2026-07-26, user's call)**: commit the infrastructure -
 `premium_discount_zone()`/`trading_session()`/both `_extra_gates_ok()`

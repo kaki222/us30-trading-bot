@@ -47,6 +47,22 @@ REGIME_OPTIMIZE_KWARGS = dict(
     constraint=lambda p: p.atr_tp_mult > p.atr_sl_mult,
 )
 
+# LiquiditySweepStrategy's own tunable params - didn't exist until the
+# 2026-07-26 SMC zone-gate walk-forward optimization pass (ARCHITECTURE.md,
+# "SMC zone/session gate" section). Before this, the strategy family had
+# only ever been walk-forward tested with optimize_kwargs=None (fixed
+# defaults, no per-fold tuning) - unlike ConfluenceStrategy, which has had
+# a real grid (above) from early on. Use with strategy_cls=LiquiditySweepStrategy.
+LIQUIDITY_OPTIMIZE_KWARGS = dict(
+    max_bars_to_bos=[6, 9, 12],
+    max_pullback_bars=[8, 12, 16],
+    target_rr=[1.5, 2.0, 2.5, 3.0],
+    maximize="SQN",
+)
+
+# Same grid plus zone_lookback, for strategy_cls=SMCZoneLiquiditySweepStrategy.
+SMC_ZONE_LIQUIDITY_OPTIMIZE_KWARGS = dict(LIQUIDITY_OPTIMIZE_KWARGS, zone_lookback=[8, 15, 25])
+
 
 def run_fold(df, train_start, train_end, test_end, cash=100_000, verbose=True,
              strategy_cls=RegimeConfluenceStrategy, optimize_kwargs=REGIME_OPTIMIZE_KWARGS):
