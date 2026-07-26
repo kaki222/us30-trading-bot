@@ -200,7 +200,8 @@ def _log_line(symbol_key: str, info: dict) -> str:
 
 
 def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
-                    bars: int, timeframe: str, visible_bars: int, view_state: dict, bias: str | None) -> dict:
+                    bars: int, timeframe: str, visible_bars: int, view_state: dict, bias: str | None,
+                    show_ylabels: bool = True, n_columns: int = 1, panel_width_in: float = 0.0) -> dict:
     df = build_live_features(symbol, er_length=PARAMS.get("er_length", 20), timeframe=timeframe)
     swing_hi = _swing_high(df["High"], PARAMS["swing_lookback"]).tail(bars)
     swing_lo = _swing_low(df["Low"], PARAMS["swing_lookback"]).tail(bars)
@@ -235,15 +236,16 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
         mpf.make_addplot(chart_df["ma_360"], ax=price_ax, color=MA_MACRO_2, width=1.0, linestyle=":"),
         mpf.make_addplot(swing_hi, ax=price_ax, color=UP, width=0.8, linestyle=":"),
         mpf.make_addplot(swing_lo, ax=price_ax, color=DOWN, width=0.8, linestyle=":"),
-        mpf.make_addplot(chart_df["er"], ax=er_ax, color=ER_LINE, width=1.3, ylabel="ER"),
+        mpf.make_addplot(chart_df["er"], ax=er_ax, color=ER_LINE, width=1.3, ylabel=("ER" if show_ylabels else "")),
         mpf.make_addplot(er_threshold_line, ax=er_ax, color=ER_THRESH, width=0.9, linestyle="--"),
-        mpf.make_addplot(chart_df["macd_hist"], type="bar", ax=macd_ax, color=macd_colors, width=0.7, ylabel="MACD"),
+        mpf.make_addplot(chart_df["macd_hist"], type="bar", ax=macd_ax, color=macd_colors, width=0.7,
+                          ylabel=("MACD" if show_ylabels else "")),
     ]
 
     mpf.plot(
         chart_df[["Open", "High", "Low", "Close", "Volume"]],
         type="candle", ax=price_ax, style=DASH_STYLE, volume=False,
-        show_nontrading=False, addplot=addplots,
+        show_nontrading=False, addplot=addplots, ylabel=("Price" if show_ylabels else ""),
     )
 
     price_ax.legend(handles=_LEGEND_HANDLES, loc="upper left", fontsize=7,
@@ -313,15 +315,23 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
     # Column titles used to be one fixed-size line regardless of how wide
     # the actual window was - fine at this file's original full-size
     # design width, but resizing/docking the window to something
-    # narrower (get_size_inches() genuinely shrinks on an interactive
-    # backend resize, unlike the axes' figure-fraction position) left the
-    # same point-sized text taking up a growing share of a shrinking
-    # column, until neighboring columns' titles started overlapping -
-    # exactly what showed up when docked to half a screen (2026-07-26).
-    # Recomputed every redraw (not just once) so it tracks whatever the
+    # narrower left the same point-sized text taking up a growing share
+    # of a shrinking column, until neighboring columns' titles started
+    # overlapping - what showed up when docked to half a screen
+    # (2026-07-26). Recomputed every redraw so it tracks whatever the
     # CURRENT window size is, not the size at startup.
+    #
+    # Deliberately NOT using price_ax.get_position().width here (tried
+    # first, reverted same day) - right after ax.clear() a few lines up,
+    # an axes' position can briefly read back its gridspec-default slot
+    # rather than whatever tight_layout last computed for it, since
+    # clear()/cla() resets more than just the plotted content. Using the
+    # fixed design fractions instead (n_columns, PANEL_WIDTH_IN - both
+    # known constants, no dependency on axes state or draw-order timing)
+    # sidesteps that entirely: this stays correct regardless of when in
+    # the redraw cycle it's computed.
     fig_width_in = price_ax.figure.get_size_inches()[0]
-    col_width_in = fig_width_in * price_ax.get_position().width
+    col_width_in = max(0.1, fig_width_in - panel_width_in) / max(1, n_columns)
     if col_width_in >= 5.5:
         title_text, fontsize = f"{line1}  {line2}", 11
     elif col_width_in >= 3.0:
@@ -598,7 +608,12 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
     # the window got resized to an unusual (e.g. tall, half-screen) aspect
     # ratio - giving tight_layout a smaller, fixed vertical budget to work
     # with makes its auto-spacing choices less extreme in those cases too.
-    HEADER_RECT = (0, RESERVED_BAND_TOP, grid_width_in / total_width_in, 0.93)
+    # Top bumped 0.93 -> 0.96 (2026-07-26): the big "US30-TRADING-BOT //
+    # LIVE MONITOR" banner text below was dropped as redundant (the OS
+    # window title bar - set via set_window_title above - already says
+    # the same thing), freeing that row for the chart grid instead of a
+    # row of text.
+    HEADER_RECT = (0, RESERVED_BAND_TOP, grid_width_in / total_width_in, 0.96)
 
     def _on_resize(_event):
         # Without this, resizing/snapping the window only re-flows text
@@ -610,14 +625,16 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
 
     fig.canvas.mpl_connect("resize_event", _on_resize)
 
-    # SCADA-style header banner: static title left, live connection/clock
-    # right. fig.text() has no built-in "replace the last one" behavior
-    # like fig.suptitle() does, so the right side is created once here and
-    # updated in place via set_text() each cycle - calling fig.text() again
-    # in the loop would just keep stacking new overlapping text objects.
-    fig.text(0.01, 0.975, "US30-TRADING-BOT  //  LIVE MONITOR", fontsize=12, fontweight="bold",
-             fontfamily=HEADER_FONT, color=ACCENT_CYAN, ha="left", va="top")
-    header_right = fig.text(0.99, 0.975, "", fontsize=9, fontfamily=MONO, color=UP, ha="right", va="top")
+    # Live connection/clock status, top-right. The static "US30-TRADING-BOT
+    # // LIVE MONITOR" banner that used to sit top-left was dropped
+    # (2026-07-26, user's call) - purely redundant with the OS window
+    # title (set above) and was one of two things taking up space the
+    # user wanted given back to the charts. fig.text() has no built-in
+    # "replace the last one" behavior like fig.suptitle() does, so this
+    # is created once here and updated in place via set_text() each cycle
+    # - calling fig.text() again in the loop would just keep stacking new
+    # overlapping text objects.
+    header_right = fig.text(0.99, 0.99, "", fontsize=9, fontfamily=MONO, color=UP, ha="right", va="top")
 
     # Bottom ~30% (y < RESERVED_BAND_TOP) is deliberately empty - see
     # HEADER_RECT/PANEL_TOP comments above. Labeled rather than left as
@@ -639,8 +656,15 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
             cycle_bias = load_overrides()["bias"]
             for col, (symbol_key, symbol) in enumerate(symbols):
                 price_ax, er_ax, macd_ax = axgrid[0, col], axgrid[1, col], axgrid[2, col]
+                # show_ylabels=False for every column after the first: mplfinance
+                # repeats "Price"/"ER"/"MACD" text per column by default, which is
+                # redundant once you're looking at 2+ columns side by side (each
+                # axes already carries its own numeric ticks) and was eating
+                # horizontal space in the gutter between columns (2026-07-26,
+                # user's call - the second red-boxed item alongside the banner above).
                 _redraw_column(symbol_key, symbol, price_ax, er_ax, macd_ax, bars, tf, visible_bars,
-                                view_state, cycle_bias.get(symbol_key))
+                                view_state, cycle_bias.get(symbol_key),
+                                show_ylabels=(col == 0), n_columns=n, panel_width_in=PANEL_WIDTH_IN)
 
             try:
                 acct = account_summary()
