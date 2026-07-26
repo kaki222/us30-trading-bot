@@ -87,6 +87,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.patches import Rectangle
 from matplotlib.widgets import RadioButtons, Button, TextBox
 import mplfinance as mpf
 
@@ -133,6 +134,11 @@ MA_MACRO_2 = "#4a6080"
 ER_LINE = "#ce93d8"
 ER_THRESH = "#ffab00"
 ACCENT_CYAN = "#00e5ff"  # header banner / "// TAG" captions
+AXIS_LABEL = "#ffffff"  # Price/ER/MACD y-axis word labels (2026-07-26: the
+# style's default text.color (TEXT, a pale blue-gray) read as washed-out/
+# low-contrast next to the bright-cyan "// CAPTION" text directly above -
+# bumped these specifically to pure white rather than changing TEXT itself,
+# since TEXT is still used plenty of other places that weren't flagged.
 
 # Their web fonts (Orbitron/Share Tech Mono/Rajdhani) aren't installed
 # system fonts, so matplotlib can't see them out of the box - falls back
@@ -251,6 +257,11 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
     price_ax.legend(handles=_LEGEND_HANDLES, loc="upper left", fontsize=7,
                      framealpha=0.35, facecolor=BG, edgecolor=PANEL_EDGE, labelcolor=TEXT_MUTED)
 
+    if show_ylabels:
+        for ax in (price_ax, er_ax, macd_ax):
+            ax.yaxis.label.set_color(AXIS_LABEL)
+            ax.yaxis.label.set_fontweight("bold")
+
     er_ax.axhspan(PARAMS["er_threshold"], 1.0, color=UP, alpha=0.10)
     er_ax.set_ylim(0, 1)
     macd_ax.axhline(0, color=TEXT_MUTED, linewidth=0.7)
@@ -307,10 +318,18 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
     macd_ax.set_xticks(date_ticks)
     macd_ax.set_xticklabels(date_labels, rotation=45, ha="right", fontsize=8, color=TEXT_MUTED)
 
-    title_color = DOWN if info["cooldown"] else (UP if info["regime"] == "TRENDING" else TEXT_MUTED)
+    # CHOP-state title used to be TEXT_MUTED (a pale slate-blue) - flagged
+    # 2026-07-26 as reading like a washed-out "white" against this dark
+    # theme, hard to read at a glance. Swapped for ER_THRESH (the same
+    # amber/gold already used for the ER threshold line/"SETPOINT" role
+    # elsewhere in this palette) rather than inventing a new color -
+    # TRENDING (green) and COOLDOWN (red) keep their existing, already-clear
+    # meaning.
+    title_color = DOWN if info["cooldown"] else (UP if info["regime"] == "TRENDING" else ER_THRESH)
     breaker_txt = "COOLDOWN" if info["cooldown"] else "clear"
     line1 = f"{symbol_key} ({timeframe})  close={info['close']:.2f}  ER={info['er']:.2f} [{info['regime']}]"
     line2 = f"bias={info['bias']}  breaker={breaker_txt}"
+    one_line = f"{line1}  {line2}"
 
     # Column titles used to be one fixed-size line regardless of how wide
     # the actual window was - fine at this file's original full-size
@@ -318,26 +337,48 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
     # narrower left the same point-sized text taking up a growing share
     # of a shrinking column, until neighboring columns' titles started
     # overlapping - what showed up when docked to half a screen
-    # (2026-07-26). Recomputed every redraw so it tracks whatever the
-    # CURRENT window size is, not the size at startup.
-    #
-    # Deliberately NOT using price_ax.get_position().width here (tried
-    # first, reverted same day) - right after ax.clear() a few lines up,
-    # an axes' position can briefly read back its gridspec-default slot
-    # rather than whatever tight_layout last computed for it, since
-    # clear()/cla() resets more than just the plotted content. Using the
-    # fixed design fractions instead (n_columns, PANEL_WIDTH_IN - both
-    # known constants, no dependency on axes state or draw-order timing)
-    # sidesteps that entirely: this stays correct regardless of when in
-    # the redraw cycle it's computed.
-    fig_width_in = price_ax.figure.get_size_inches()[0]
-    col_width_in = max(0.1, fig_width_in - panel_width_in) / max(1, n_columns)
-    if col_width_in >= 5.5:
-        title_text, fontsize = f"{line1}  {line2}", 11
-    elif col_width_in >= 3.0:
-        title_text, fontsize = f"{line1}  {line2}", 9
-    else:
-        title_text, fontsize = f"{line1}\n{line2}", 8
+    # (2026-07-26). A fixed inch-width heuristic (tried right after that,
+    # same day) turned out to still not GUARANTEE a fit - "the titles
+    # should fit... even spanning two lines" (2026-07-26, user's follow-up)
+    # needs an actual measurement, not a guessed threshold. price_ax's
+    # renderer is already available here (canvas.draw() ran a few lines up
+    # for the date-tick trick), so probe the real rendered width of
+    # candidate title strings against the axes' actual current pixel
+    # width and pick the largest fontsize (single line first, then two
+    # lines) that actually fits - falls back to the old inch-heuristic if
+    # measuring fails for any reason (e.g. a backend without a working
+    # get_renderer() at this point) rather than raising.
+    title_text, fontsize = one_line, 11
+    try:
+        renderer = price_ax.figure.canvas.get_renderer()
+        available_px = price_ax.get_window_extent(renderer=renderer).width
+
+        def _width_px(text, fs):
+            probe = price_ax.text(0, 0, text, fontsize=fs, fontweight="bold")
+            w = probe.get_window_extent(renderer=renderer).width
+            probe.remove()
+            return w
+
+        if _width_px(one_line, 11) <= available_px:
+            title_text, fontsize = one_line, 11
+        elif _width_px(one_line, 9) <= available_px:
+            title_text, fontsize = one_line, 9
+        else:
+            for fs in (9, 8, 7):
+                if max(_width_px(line1, fs), _width_px(line2, fs)) <= available_px:
+                    title_text, fontsize = f"{line1}\n{line2}", fs
+                    break
+            else:
+                title_text, fontsize = f"{line1}\n{line2}", 7  # floor - may still be snug, never overlaps a neighbor
+    except Exception:
+        fig_width_in = price_ax.figure.get_size_inches()[0]
+        col_width_in = max(0.1, fig_width_in - panel_width_in) / max(1, n_columns)
+        if col_width_in >= 5.5:
+            title_text, fontsize = one_line, 11
+        elif col_width_in >= 3.0:
+            title_text, fontsize = one_line, 9
+        else:
+            title_text, fontsize = f"{line1}\n{line2}", 8
 
     price_ax.set_title(title_text, fontsize=fontsize, fontweight="bold", loc="left", color=title_color)
     return info
@@ -643,6 +684,24 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
     fig.text(0.01, RESERVED_BAND_TOP - 0.03, "// RESERVED — running positions (planned)",
               fontsize=8, fontfamily=MONO, color=TEXT_MUTED, ha="left", va="top")
 
+    # A second, DYNAMIC reserved-space indicator (2026-07-26) - unlike the
+    # bottom band above (a fixed, deliberate design choice), this one
+    # tracks whatever gap tight_layout leaves to the LEFT of the first
+    # chart column, which isn't always zero (seen after some window
+    # resizes - tight_layout can leave the whole chart grid shifted right
+    # rather than spanning the full width it was given). Rather than
+    # chase that down further blind, this makes whatever gap DOES appear
+    # look deliberate instead of broken: hidden (0-width) when there's no
+    # gap, shown with a border + label when there is one. Created once
+    # here, position/visibility updated every cycle below (right after
+    # tight_layout, so it reflects the layout actually in effect this cycle).
+    left_reserve_rect = Rectangle((0, RESERVED_BAND_TOP), 0, 0.96 - RESERVED_BAND_TOP,
+                                   transform=fig.transFigure, facecolor="none",
+                                   edgecolor=PANEL_EDGE, linewidth=0.8, linestyle="--", visible=False)
+    fig.add_artist(left_reserve_rect)
+    left_reserve_label = fig.text(0.005, RESERVED_BAND_TOP + 0.01, "// RESERVED", fontsize=7.5,
+                                   fontfamily=MONO, color=TEXT_MUTED, ha="left", va="bottom", visible=False)
+
     plt.show(block=False)
 
     print(f"live_monitor: {tf}, {visible_bars} candles visible by default ({bars} available - pan/zoom to see "
@@ -682,6 +741,18 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
 
             header_right.set_text(f"● MT5 LIVE   {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
             fig.tight_layout(rect=HEADER_RECT)
+
+            # See left_reserve_rect/left_reserve_label setup above - only
+            # ever shows when tight_layout actually left a gap this cycle.
+            leftmost_x0 = axgrid[0, 0].get_position().x0
+            if leftmost_x0 > 0.02:
+                left_reserve_rect.set_bounds(0, RESERVED_BAND_TOP, leftmost_x0, 0.96 - RESERVED_BAND_TOP)
+                left_reserve_rect.set_visible(True)
+                left_reserve_label.set_visible(True)
+            else:
+                left_reserve_rect.set_visible(False)
+                left_reserve_label.set_visible(False)
+
             fig.canvas.draw_idle()
             print()
             _wait_responsively(fig, refresh_seconds)
