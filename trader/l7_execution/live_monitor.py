@@ -354,37 +354,42 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
         available_px = price_ax.get_window_extent(renderer=renderer).width
 
         def _width_px(text, fs):
-            probe = price_ax.text(0, 0, text, fontsize=fs, fontweight="bold")
+            probe = price_ax.text(0, 0, text, fontsize=fs, fontweight="normal")
             w = probe.get_window_extent(renderer=renderer).width
             probe.remove()
             return w
 
-        if _width_px(one_line, 11) <= available_px:
-            title_text, fontsize = one_line, 11
-        elif _width_px(one_line, 9) <= available_px:
+        # Sizes brought down a notch (2026-07-26, user's call: "huge... make
+        # lower size and no-bold") - was 11/9/8/7, now 9/8/7/6. Same
+        # measured-fit logic as before, just a smaller ceiling.
+        if _width_px(one_line, 9) <= available_px:
             title_text, fontsize = one_line, 9
+        elif _width_px(one_line, 7) <= available_px:
+            title_text, fontsize = one_line, 7
         else:
-            for fs in (9, 8, 7):
+            for fs in (7, 6):
                 if max(_width_px(line1, fs), _width_px(line2, fs)) <= available_px:
                     title_text, fontsize = f"{line1}\n{line2}", fs
                     break
             else:
-                title_text, fontsize = f"{line1}\n{line2}", 7  # floor - may still be snug, never overlaps a neighbor
+                title_text, fontsize = f"{line1}\n{line2}", 6  # floor - may still be snug, never overlaps a neighbor
     except Exception:
         fig_width_in = price_ax.figure.get_size_inches()[0]
         col_width_in = max(0.1, fig_width_in - panel_width_in) / max(1, n_columns)
         if col_width_in >= 5.5:
-            title_text, fontsize = one_line, 11
-        elif col_width_in >= 3.0:
             title_text, fontsize = one_line, 9
+        elif col_width_in >= 3.0:
+            title_text, fontsize = one_line, 7
         else:
-            title_text, fontsize = f"{line1}\n{line2}", 8
+            title_text, fontsize = f"{line1}\n{line2}", 6
 
-    price_ax.set_title(title_text, fontsize=fontsize, fontweight="bold", loc="left", color=title_color)
+    price_ax.set_title(title_text, fontsize=fontsize, fontweight="normal", loc="left", color=title_color)
     return info
 
 
 PANEL_WIDTH_IN = 3.4  # fixed-width inches for the right-side panel (info + controls)
+LEFT_PANEL_WIDTH_IN = 1.6  # fixed-width inches for a left-side reserved quadrant (2026-07-26)
+QUADRANT_EDGE = "#29b6f6"  # bright blue border for the two side "quadrant" boxes (same blue as EMA8)
 
 BIAS_OPTIONS = ["Long", "Neutral", "Short"]  # RadioButtons labels -> set_bias() value below
 _BIAS_LABEL_TO_VALUE = {"Long": "long", "Neutral": None, "Short": "short"}
@@ -603,7 +608,9 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
 
     plt.ion()
     grid_width_in = 8 * n
-    total_width_in = grid_width_in + PANEL_WIDTH_IN
+    total_width_in = LEFT_PANEL_WIDTH_IN + grid_width_in + PANEL_WIDTH_IN
+    left_panel_frac = LEFT_PANEL_WIDTH_IN / total_width_in
+    chart_right_frac = (LEFT_PANEL_WIDTH_IN + grid_width_in) / total_width_in
     fig, axgrid = plt.subplots(
         nrows=3, ncols=n, figsize=(total_width_in, 8.5),
         gridspec_kw={"height_ratios": [3, 1, 1]},
@@ -633,7 +640,7 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
     # below that, one bias/pause/key-level control block per symbol
     # (built once - see _build_controls's docstring for why those can't
     # be torn down and rebuilt like the text above them).
-    panel_left = grid_width_in / total_width_in + 0.01
+    panel_left = chart_right_frac + 0.01
     panel_width = 1 - panel_left - 0.015
     text_bottom = PANEL_TOP - TEXT_BLOCK_HEIGHT
     panel_ax = fig.add_axes([panel_left, text_bottom, panel_width, TEXT_BLOCK_HEIGHT])
@@ -653,8 +660,13 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
     # LIVE MONITOR" banner text below was dropped as redundant (the OS
     # window title bar - set via set_window_title above - already says
     # the same thing), freeing that row for the chart grid instead of a
-    # row of text.
-    HEADER_RECT = (0, RESERVED_BAND_TOP, grid_width_in / total_width_in, 0.96)
+    # row of text. Left bound is left_panel_frac (not 0) - see
+    # LEFT_PANEL_WIDTH_IN above: a deliberate reserved strip, not the
+    # incidental gap an earlier version of this tried to detect dynamically
+    # and label after the fact (removed same day - it was catching normal
+    # small margins too, not just genuine gaps, and looked more like noise
+    # than a real reserved area).
+    HEADER_RECT = (left_panel_frac, RESERVED_BAND_TOP, chart_right_frac, 0.96)
 
     def _on_resize(_event):
         # Without this, resizing/snapping the window only re-flows text
@@ -684,23 +696,24 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
     fig.text(0.01, RESERVED_BAND_TOP - 0.03, "// RESERVED — running positions (planned)",
               fontsize=8, fontfamily=MONO, color=TEXT_MUTED, ha="left", va="top")
 
-    # A second, DYNAMIC reserved-space indicator (2026-07-26) - unlike the
-    # bottom band above (a fixed, deliberate design choice), this one
-    # tracks whatever gap tight_layout leaves to the LEFT of the first
-    # chart column, which isn't always zero (seen after some window
-    # resizes - tight_layout can leave the whole chart grid shifted right
-    # rather than spanning the full width it was given). Rather than
-    # chase that down further blind, this makes whatever gap DOES appear
-    # look deliberate instead of broken: hidden (0-width) when there's no
-    # gap, shown with a border + label when there is one. Created once
-    # here, position/visibility updated every cycle below (right after
-    # tight_layout, so it reflects the layout actually in effect this cycle).
-    left_reserve_rect = Rectangle((0, RESERVED_BAND_TOP), 0, 0.96 - RESERVED_BAND_TOP,
-                                   transform=fig.transFigure, facecolor="none",
-                                   edgecolor=PANEL_EDGE, linewidth=0.8, linestyle="--", visible=False)
-    fig.add_artist(left_reserve_rect)
-    left_reserve_label = fig.text(0.005, RESERVED_BAND_TOP + 0.01, "// RESERVED", fontsize=7.5,
-                                   fontfamily=MONO, color=TEXT_MUTED, ha="left", va="bottom", visible=False)
+    # Two "quadrant" boxes (2026-07-26, replacing the dynamic left-gap
+    # detector tried earlier same day - that caught ordinary small
+    # margins too, not just genuine gaps, and read as noise rather than
+    # a real reserved area). Both are deliberate, fixed regions now - the
+    # left one is LEFT_PANEL_WIDTH_IN's worth of genuinely reserved space
+    # (not an incidental leftover), the right one visually frames the
+    # existing account/controls panel the same way. Both drawn once as
+    # plain Rectangle patches (not axes - no data goes in them, they're
+    # just a border), so nothing here interacts with tight_layout at all.
+    quadrant_top, quadrant_bottom = 0.96, RESERVED_BAND_TOP
+    fig.add_artist(Rectangle((0, quadrant_bottom), left_panel_frac, quadrant_top - quadrant_bottom,
+                              transform=fig.transFigure, facecolor="none",
+                              edgecolor=QUADRANT_EDGE, linewidth=1.0))
+    fig.text(0.01, quadrant_bottom + 0.01, "// RESERVED", fontsize=7.5,
+             fontfamily=MONO, color=TEXT_MUTED, ha="left", va="bottom")
+    fig.add_artist(Rectangle((chart_right_frac + 0.005, quadrant_bottom), 1 - chart_right_frac - 0.008,
+                              quadrant_top - quadrant_bottom, transform=fig.transFigure,
+                              facecolor="none", edgecolor=QUADRANT_EDGE, linewidth=1.0))
 
     plt.show(block=False)
 
@@ -741,18 +754,6 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
 
             header_right.set_text(f"● MT5 LIVE   {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
             fig.tight_layout(rect=HEADER_RECT)
-
-            # See left_reserve_rect/left_reserve_label setup above - only
-            # ever shows when tight_layout actually left a gap this cycle.
-            leftmost_x0 = axgrid[0, 0].get_position().x0
-            if leftmost_x0 > 0.02:
-                left_reserve_rect.set_bounds(0, RESERVED_BAND_TOP, leftmost_x0, 0.96 - RESERVED_BAND_TOP)
-                left_reserve_rect.set_visible(True)
-                left_reserve_label.set_visible(True)
-            else:
-                left_reserve_rect.set_visible(False)
-                left_reserve_label.set_visible(False)
-
             fig.canvas.draw_idle()
             print()
             _wait_responsively(fig, refresh_seconds)
