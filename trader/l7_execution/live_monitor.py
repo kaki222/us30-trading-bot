@@ -31,6 +31,14 @@ you haven't touched the view snap to the latest ~18 candles - once you
 manually pan or zoom, that view sticks through future refreshes instead
 of snapping back every cycle.
 
+--bars genuinely controls how much history is fetched from MT5 now
+(2026-07-26; used to only relabel a subset of a fixed 800-bar fetch, so
+it silently couldn't go past ~133 days no matter how high you set it) -
+e.g. --bars 2200 for roughly a year of H4 candles pannable, not just the
+default ~25 days. Never fetches fewer than 800 under the hood even for
+a small --bars, so indicators needing a long warm-up (MA360) keep their
+usual safety margin.
+
 Read-only about ORDERS: never calls place_trade() or run_once() - it's
 on its own refresh timer, independent of the scheduled trading cycle.
 Safe to leave open all day. No buttons, no order entry, no way to move
@@ -208,7 +216,18 @@ def _log_line(symbol_key: str, info: dict) -> str:
 def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
                     bars: int, timeframe: str, visible_bars: int, view_state: dict, bias: str | None,
                     show_ylabels: bool = True, n_columns: int = 1, panel_width_in: float = 0.0) -> dict:
-    df = build_live_features(symbol, er_length=PARAMS.get("er_length", 20), timeframe=timeframe)
+    # count=max(bars, 800) (2026-07-26): build_live_features() has its own
+    # hardcoded default fetch of 800 bars, independent of `bars` (this
+    # file's --bars flag) - which used to mean --bars could only ever
+    # relabel a subset of that fixed 800-bar fetch (~133 days of H4), never
+    # actually pull more history than that. A year of H4 is ~2,190 bars -
+    # passing count explicitly, floored at 800 (not just `bars` alone),
+    # fetches genuinely more when you ask for it via --bars while leaving
+    # the default (150) fetch unchanged, so indicators needing a long
+    # warm-up (MA360 needs 360 bars) still have their usual safety margin
+    # instead of coming back all-NaN for a small --bars value.
+    df = build_live_features(symbol, er_length=PARAMS.get("er_length", 20), timeframe=timeframe,
+                              count=max(bars, 800))
     swing_hi = _swing_high(df["High"], PARAMS["swing_lookback"]).tail(bars)
     swing_lo = _swing_low(df["Low"], PARAMS["swing_lookback"]).tail(bars)
     chart_df = df.tail(bars)
@@ -786,7 +805,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mt5_path", nargs="?", default=None, help="optional path to terminal64.exe")
     parser.add_argument("--refresh", type=int, default=60, help="seconds between refreshes (default 60)")
-    parser.add_argument("--bars", type=int, default=150, help="bars fetched/available to scroll into (default 150)")
+    parser.add_argument("--bars", type=int, default=150,
+                         help="bars fetched/available to scroll into (default 150; e.g. 2200 for ~1yr of H4)")
     parser.add_argument("--visible-bars", type=int, default=18, help="candles shown by default before you pan/zoom (default 18)")
     parser.add_argument("--timeframe", default=None, help="override run_scheduled.py's TIMEFRAME for this view only")
     args = parser.parse_args()
