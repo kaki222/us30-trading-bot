@@ -200,6 +200,8 @@ def build_live_features(symbol: str, er_length: int = 20, count: int = 800, time
     d = get_live_bars(symbol, timeframe=timeframe, count=count)
     d["ma_360"] = sma(d["close"], 360)
     d["ma_200"] = sma(d["close"], 200)
+    d["ma_89"] = sma(d["close"], 89)  # "mood" MA (2026-07-26) - live_monitor.py plots this;
+    # already computed in build_bt_df() for backtesting, just hadn't been ported to the live side yet.
     d["ema_21"] = ema(d["close"], 21)
     d["ema_8"] = ema(d["close"], 8)
     d["macd"], d["macd_signal"], d["macd_hist"] = macd(d["close"])

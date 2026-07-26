@@ -22,7 +22,9 @@ and reapplied every redraw, since ax.clear() resets an axes' facecolor
 back to matplotlib's default each cycle. Change the color constants
 near the top of this file to retheme it.
 
-Default view is the most recent ~18 candles (--visible-bars to change).
+Default view is the most recent ~40 candles (--visible-bars to change;
+raised from an original 18 on 2026-07-26 - that felt too zoomed in,
+user report).
 A wider window (--bars, default 150) is still fetched and plotted
 underneath that - use the toolbar's Pan/Zoom buttons (the hand and
 magnifying-glass icons) or scroll out to see it. Panning/zooming is
@@ -135,8 +137,9 @@ TEXT = "#c8d8f0"
 TEXT_MUTED = "#4a6080"
 UP = "#00e676"
 DOWN = "#ff1744"
-EMA_FAST = "#29b6f6"
-EMA_SLOW = "#7c4dff"
+EMA_FAST = "#ff5252"  # EMA8 - red (2026-07-26, user's call; was cyan-blue). Dashed + thin in the plot itself.
+EMA_SLOW = "#2e7d32"  # EMA21 - dark green (2026-07-26; was purple)
+MOOD_MA = "#2979ff"  # MA89 "mood" line (2026-07-26, new) - a clear blue, distinct from EMA8's red now
 MA_MACRO_1 = "#7c93b8"
 MA_MACRO_2 = "#4a6080"
 ER_LINE = "#ce93d8"
@@ -171,8 +174,9 @@ DASH_STYLE = mpf.make_mpf_style(
 )
 
 _LEGEND_HANDLES = [
-    Line2D([0], [0], color=EMA_FAST, lw=1.2, label="EMA8"),
+    Line2D([0], [0], color=EMA_FAST, lw=0.9, linestyle="--", label="EMA8"),
     Line2D([0], [0], color=EMA_SLOW, lw=1.2, label="EMA21"),
+    Line2D([0], [0], color=MOOD_MA, lw=1.2, label="MA89 (mood)"),
     Line2D([0], [0], color=MA_MACRO_1, lw=1.0, linestyle="--", label="MA200"),
     Line2D([0], [0], color=MA_MACRO_2, lw=1.0, linestyle=":", label="MA360"),
     Line2D([0], [0], color=UP, lw=0.9, linestyle=":", label="swing hi/lo"),
@@ -255,8 +259,9 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
     macd_colors = [UP if v > 0 else DOWN for v in chart_df["macd_hist"].fillna(0)]
 
     addplots = [
-        mpf.make_addplot(chart_df["ema_8"], ax=price_ax, color=EMA_FAST, width=1.2),
+        mpf.make_addplot(chart_df["ema_8"], ax=price_ax, color=EMA_FAST, width=0.7, linestyle="--"),
         mpf.make_addplot(chart_df["ema_21"], ax=price_ax, color=EMA_SLOW, width=1.2),
+        mpf.make_addplot(chart_df["ma_89"], ax=price_ax, color=MOOD_MA, width=1.2),
         mpf.make_addplot(chart_df["ma_200"], ax=price_ax, color=MA_MACRO_1, width=1.0, linestyle="--"),
         mpf.make_addplot(chart_df["ma_360"], ax=price_ax, color=MA_MACRO_2, width=1.0, linestyle=":"),
         mpf.make_addplot(swing_hi, ax=price_ax, color=UP, width=0.8, linestyle=":"),
@@ -288,9 +293,17 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
     # SCADA-style panel captions (ax.text, not set_title, so they read as
     # instrument labels rather than headings) - cleared with the rest of
     # the axes every cycle by ax.clear() above, so no separate bookkeeping.
-    er_ax.text(0.005, 1.06, "// ER — REGIME GATE", transform=er_ax.transAxes,
+    # 2026-07-26: append the live current value to each caption (user
+    # request - "top left of ER window there should be the current
+    # number, idem MACD") instead of leaving them as plain labels with
+    # no readout - info["er"] already computed above by _regime_info();
+    # last_macd read straight off chart_df (same last row info came from).
+    er_val = f"{info['er']:.3f}" if pd.notna(info["er"]) else "n/a"
+    last_macd = chart_df["macd_hist"].iloc[-1]
+    macd_val = f"{last_macd:+.2f}" if pd.notna(last_macd) else "n/a"
+    er_ax.text(0.005, 1.06, f"// ER — REGIME GATE   {er_val}", transform=er_ax.transAxes,
                fontsize=7.5, fontfamily=MONO, color=ACCENT_CYAN, ha="left", va="bottom")
-    macd_ax.text(0.005, 1.06, "// MACD — MOMENTUM", transform=macd_ax.transAxes,
+    macd_ax.text(0.005, 1.06, f"// MACD — MOMENTUM   {macd_val}", transform=macd_ax.transAxes,
                  fontsize=7.5, fontfamily=MONO, color=ACCENT_CYAN, ha="left", va="bottom")
 
     # Default view: latest `visible_bars` candles, not the full `bars`
@@ -484,7 +497,18 @@ def _panel_rect(panel_left: float, panel_width: float, y_top: float, height: flo
 # alone without shrinking _build_controls' internal widget heights would
 # have reintroduced the exact overlap bug this layout was fixed for
 # before (see the "live_monitor.py dashboard rebuild" ARCHITECTURE.md entry).
-RESERVED_BAND_TOP = 0.30  # y < this is the reserved-for-later bottom 30%
+#
+# 2026-07-26, later same day: relaxed 0.30 -> 0.14 - the price/ER/MACD
+# grid was cramped enough at 70% that the ER and MACD sub-panel titles/
+# axes visually overlapped (user report, live screenshot). User
+# explicitly OK'd eating into the reserved band for this ("use the
+# reserved space down below if needed"). Only THIS constant moved - the
+# right-side account/controls panel's own internal heights
+# (TEXT_BLOCK_HEIGHT/CONTROL_BLOCK_HEIGHT/BLOCK_GAP) are untouched, so
+# its widgets still end at the old y=0.30; the reserved/bordered area
+# below them just got smaller (still blank, still labeled), same as
+# intended, just less of it.
+RESERVED_BAND_TOP = 0.14  # y < this is the reserved-for-later bottom band
 PANEL_TOP = 0.90
 PANEL_BOTTOM = RESERVED_BAND_TOP
 TEXT_BLOCK_HEIGHT = 0.18
@@ -617,7 +641,7 @@ def _make_key_level_callback(symbol_key: str, which: str, textbox):
 
 
 def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None,
-        mt5_path: str | None = None, visible_bars: int = 18):
+        mt5_path: str | None = None, visible_bars: int = 40):
     tf = timeframe or TIMEFRAME
     connect(path=mt5_path)
 
@@ -807,7 +831,7 @@ def main():
     parser.add_argument("--refresh", type=int, default=60, help="seconds between refreshes (default 60)")
     parser.add_argument("--bars", type=int, default=150,
                          help="bars fetched/available to scroll into (default 150; e.g. 2200 for ~1yr of H4)")
-    parser.add_argument("--visible-bars", type=int, default=18, help="candles shown by default before you pan/zoom (default 18)")
+    parser.add_argument("--visible-bars", type=int, default=40, help="candles shown by default before you pan/zoom (default 40)")
     parser.add_argument("--timeframe", default=None, help="override run_scheduled.py's TIMEFRAME for this view only")
     args = parser.parse_args()
     run(refresh_seconds=args.refresh, bars=args.bars, timeframe=args.timeframe,
