@@ -12,7 +12,7 @@ file is layers 3+4 combined.
 import numpy as np
 from backtesting import Strategy
 
-from .l2_features import swing_high, swing_low
+from .l2_features import swing_high, swing_low, premium_discount_zone, trading_session
 from .l3_regime import efficiency_ratio
 from .l5_position_sizing import risk_based_size
 from .l6_risk import CircuitBreakerMixin
@@ -50,6 +50,21 @@ class ConfluenceStrategy(CircuitBreakerMixin, Strategy):
     def _regime_warmed_up(self) -> bool:
         return not np.isnan(self.adx_14[-1])
 
+    def _extra_gates_ok(self, direction: str) -> bool:
+        """
+        Optional additional entry gate(s), checked alongside _regime_ok()
+        but independent of it (2026-07-26). Base implementation is a
+        no-op (always True) - ANDed into next()'s long_signal/
+        short_signal below, an "and True" that provably cannot change
+        ConfluenceStrategy/RegimeConfluenceStrategy's behavior versus
+        before this hook existed. Exists so a subclass (see
+        SMCZoneConfluenceStrategy) can layer on extra conditions - e.g.
+        a premium/discount zone filter - without touching or duplicating
+        next()'s already walk-forward-tested logic. `direction` is
+        "long" or "short".
+        """
+        return True
+
     def next(self):
         # --- Layer 6 (risk overlay: circuit breaker) ---
         self._cb_update()
@@ -73,8 +88,8 @@ class ConfluenceStrategy(CircuitBreakerMixin, Strategy):
         macro_uptrend = price > self.ma_360[-1] and price > self.ma_200[-1]
         macro_downtrend = price < self.ma_360[-1] and price < self.ma_200[-1]
 
-        long_signal = trending and macro_uptrend and ema_bullish and macd_bull and bos_up
-        short_signal = trending and macro_downtrend and ema_bearish and macd_bear and bos_down
+        long_signal = trending and macro_uptrend and ema_bullish and macd_bull and bos_up and self._extra_gates_ok("long")
+        short_signal = trending and macro_downtrend and ema_bearish and macd_bear and bos_down and self._extra_gates_ok("short")
 
         if not self.position:
             if not in_cooldown:
@@ -123,3 +138,58 @@ class RegimeConfluenceStrategy(ConfluenceStrategy):
 
     def _regime_warmed_up(self) -> bool:
         return not np.isnan(self.er[-1])
+
+
+class SMCZoneConfluenceStrategy(RegimeConfluenceStrategy):
+    """
+    RegimeConfluenceStrategy + two additional entry gates mined
+    (2026-07-26) from a personal SMC research notebook the user pointed
+    me at (Journalling/XAUUSD's "V1006" dashboard - not part of this
+    repo; that notebook auto-computes a premium/discount range and
+    tags a trading session per bar, for a manual weekly chart journal,
+    never backtested there). Both gates are pure ANDs on top of
+    ConfluenceStrategy's five original conditions via `_extra_gates_ok()`
+    - neither touches or duplicates the already walk-forward-tested
+    entry/exit logic itself.
+
+    - Zone gate: only take LONGS while price sits in the "discount"
+      (lower) half of the recent range (l2_features.premium_discount_zone,
+      structure_high/range_low via swing_high()/swing_low()), only take
+      SHORTS from "premium" (upper) half. Idea: only trade toward the
+      far side of the range, not while price is already sitting deep in
+      the half that would make the trade a "buying high / selling low"
+      entry relative to the immediate structure.
+    - Session gate (`session_gate_enabled`, default True): only take
+      entries during the notebook's London/New York session windows
+      (l2_features.trading_session()), skip "Off-session" bars. Ported
+      as-is from a filter built for 5m/15m bars onto this project's H4
+      production timeframe - worth stating plainly: a 3-5 hour session
+      window is a coarse, possibly not very discriminating filter
+      against 4-hour bars (many H4 bars will straddle a session
+      boundary), and trading_session()'s own docstring flags its
+      timezone assumption as unverified for this project's data. Treat
+      this gate's walk-forward numbers as informative about whether the
+      *zone* gate alone is worth keeping, not as a proven session edge
+      at H4 - re-test at a finer timeframe before trusting the session
+      half of this class specifically.
+    """
+    zone_lookback = 8
+    session_gate_enabled = True
+
+    def init(self):
+        super().init()
+        d = self.data.df
+        zone_df = premium_discount_zone(d, structure_lookback=self.zone_lookback)
+        self.zone = zone_df["zone"]
+        self.session = trading_session(d.index)
+
+    def _extra_gates_ok(self, direction: str) -> bool:
+        i = len(self.data) - 1
+        zone = self.zone.iloc[i]
+        if direction == "long" and zone != "discount":
+            return False
+        if direction == "short" and zone != "premium":
+            return False
+        if self.session_gate_enabled and self.session.iloc[i] == "Off-session":
+            return False
+        return True

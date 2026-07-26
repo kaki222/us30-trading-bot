@@ -193,6 +193,88 @@ def build_liquidity_features(
 
     return d
 
+# ---------------------------------------------------------------------
+# Premium/Discount range + trading-session features (2026-07-26) — mined
+# from a personal SMC (Smart Money Concepts) research notebook
+# (Journalling/XAUUSD's "V1006 SMC dashboard" - not part of this repo,
+# read from a folder the user separately granted access to) that had
+# been used for manual weekly chart journalling, not backtesting. That
+# notebook auto-computes a range from rolling price extremes rather than
+# hand-marking levels each week (an earlier iteration of the same
+# notebook required manual level entry - this is the version that
+# doesn't), which is what makes it usable as a backtestable feature here
+# at all. Ported with one deliberate change: the source notebook's
+# structure_high/range_low are `rolling(n).max()/.min()` with NO shift,
+# meaning a bar's own high/low can define its own level - this version
+# reuses swing_high()/swing_low() above instead, which already apply
+# the same causal .shift(1) discipline as every other lookback feature
+# in this file. See l3_regime.py's SMCZoneConfluenceStrategy for how
+# these features are actually gated into an entry rule.
+# ---------------------------------------------------------------------
+
+def premium_discount_zone(df: pd.DataFrame, structure_lookback: int = 8, liquidity_lookback: int = 60) -> pd.DataFrame:
+    """
+    Classifies each bar's close as sitting in the "premium" (upper) or
+    "discount" (lower) half of the recent trading range, split at the
+    range's equilibrium (EQ) - structure_high/range_low averaged.
+    structure_high/range_low use swing_high()/swing_low() (causal,
+    excludes the current bar); liquidity_high/liquidity_low (a wider,
+    unshifted rolling extreme) are included for parity with the source
+    notebook's plotted levels but aren't read by the entry gate below -
+    they're sweep-target context, not a causal decision input.
+    """
+    structure_high = swing_high(df["High"], structure_lookback)
+    range_low = swing_low(df["Low"], structure_lookback)
+    eq = (structure_high + range_low) / 2
+    liquidity_high = df["High"].rolling(liquidity_lookback).max()
+    liquidity_low = df["Low"].rolling(liquidity_lookback).min()
+    zone = pd.Series(
+        np.where(df["Close"] > eq, "premium", np.where(df["Close"] < eq, "discount", "eq")),
+        index=df.index,
+    )
+    return pd.DataFrame({
+        "structure_high": structure_high,
+        "range_low": range_low,
+        "eq": eq,
+        "liquidity_high": liquidity_high,
+        "liquidity_low": liquidity_low,
+        "zone": zone,
+    })
+
+
+def trading_session(index: pd.DatetimeIndex, tz: str = "Asia/Dubai") -> pd.Series:
+    """
+    Per-bar "London" / "New York" / "Off-session" label, by hour-of-day
+    in `tz` local time (London 10:00-13:00, New York 13:00-18:00 -
+    the source notebook's own bucketing, built for intraday 5m/15m bars,
+    not H4 - see SMCZoneConfluenceStrategy's docstring for the
+    consequence of that mismatch at H4 granularity).
+
+    UNVERIFIED ASSUMPTION, flagged rather than silently trusted: this
+    project's OHLCV index (l1_data.py) is timezone-naive - it carries no
+    tz info, and whether it's already broker/server time, UTC, or
+    something else has never been confirmed for the H4 export
+    specifically. This function's tz_localize(tz) call ASSUMES the naive
+    index already reads as `tz` local time, which is very likely wrong
+    (MT5 exports are typically broker/server time, not Asia/Dubai) -
+    session labels from this function should be treated as a rough
+    approximation until that's checked against a known real session
+    open/close, not as ground truth. Flagged here rather than fixed
+    because fixing it needs to know the actual export's real timezone,
+    which isn't knowable from inside this sandbox - see ARCHITECTURE.md's
+    Layer 7 section for the one place this exact class of ambiguity
+    already caused a real, verified bug (LiveCircuitBreaker's server-time
+    mismatch).
+    """
+    localized = index.tz_localize(tz) if index.tz is None else index.tz_convert(tz)
+    hours = localized.hour
+    session = np.where(
+        (hours >= 10) & (hours < 13), "London",
+        np.where((hours >= 13) & (hours <= 18), "New York", "Off-session"),
+    )
+    return pd.Series(session, index=index)
+
+
 def kalman_trend(price: pd.Series, process_var: float, measurement_var: float) -> pd.DataFrame:
     """
     Local-linear-trend Kalman filter on `price`. Returns 'level' (smoothed

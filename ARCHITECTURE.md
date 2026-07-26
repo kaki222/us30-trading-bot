@@ -839,3 +839,95 @@ Walk-forward over full history is slow (grid-search re-optimized every
 quarter, anchored/growing training window) — expect ~5–35s per fold,
 accelerating as the training window grows, ~36 folds for US30 and ~48
 for Gold.
+
+---
+
+## SMC zone/session gate — mined from external research, inconclusive so far (2026-07-26)
+
+User granted access to a personal folder (`Journalling/`, outside this
+repo) of Smart Money Concepts (SMC) chart-journalling notebooks - LaTeX
+weekly reports plus ~25 iterations of a Jupyter dashboard, culminating in
+`XAUUSD/___V1006____smc_xauusd_dashboard_upgraded.ipynb`. That notebook
+auto-computes (no manual level entry, unlike earlier iterations) a
+premium/discount trading range from rolling price extremes, classifies
+each bar's zone, and tags a trading session (London/New York/Off-session)
+by hour-of-day - built for a manual weekly journal, never backtested
+there. Mined for concrete, codeable rules per the user's direction
+("mine the SMC logic for new signal ideas" / goal: "better risk-adjusted
+returns").
+
+**New, reusable features** (`l2_features.py`):
+- `premium_discount_zone(df, structure_lookback=8, liquidity_lookback=60)`
+  — structure_high/range_low via the existing `swing_high()`/`swing_low()`
+  (causal, `.shift(1)`'d) rather than the source notebook's unshifted
+  rolling max/min - a bar can't use its own extreme to classify its own
+  zone, consistent with every other lookback feature in this file.
+  Returns structure_high/range_low/eq/liquidity_high/liquidity_low/zone.
+- `trading_session(index, tz="Asia/Dubai")` — London/New York/Off-session
+  per bar. **Caveat flagged in its own docstring, not silently trusted**:
+  this project's OHLCV index is timezone-naive and its true origin
+  (broker/server time vs UTC) has never been confirmed - the function's
+  `tz_localize()` assumption is unverified. Built for 5m/15m bars in the
+  source notebook; ported onto this project's H4 bars, where a 3-5 hour
+  session window is coarse against 4-hour candles.
+
+**New gate hook, provably behavior-preserving**: `ConfluenceStrategy`
+and `LiquiditySweepStrategy` both gained a `_extra_gates_ok(direction)`
+method - default `return True`, ANDed into each strategy's existing
+entry conditions. Since the default is an unconditional `True`, this is
+an `and True` that cannot change either strategy's behavior unless a
+subclass overrides it - confirmed by re-running both against real
+history and getting the same class of results as before this change
+existed (see below; also directly reasoned through by code inspection,
+same standard used for the Layer 6 circuit-breaker extraction).
+
+**`SMCZoneConfluenceStrategy(RegimeConfluenceStrategy)`** — adds the zone
+gate (longs only from "discount", shorts only from "premium") and the
+session gate. **Finding: structurally incompatible with this strategy
+family, confirmed empirically, not assumed.** Tested the zone gate alone
+across 7 lookback widths (8 to 200 bars) against US30's full history -
+long entries satisfying `ConfluenceStrategy`'s breakout condition
+(`price > swing_high`) almost never land in "discount" at *any* width
+(0 qualifying signals every time); shorts fared only slightly better
+(3-9 signals). Reason, once seen: breaking out to a new high **is**
+pushing price toward the top of whatever range you measure it against -
+the zone concept (buy cheap, sell expensive at range extremes) and
+breakout/trend-continuation entries are close to logically incompatible
+when simply ANDed together. Session-gate-only (dropping the zone gate),
+fixed defaults, full history, no optimization: US30 +10.31% → **-10.71%**
+(247 trades, worse on every axis), Gold +4.87% → +5.82% (315 trades,
+marginal improvement). Mixed and not optimized - not a final verdict,
+but not an obvious win either.
+
+**`SMCZoneLiquiditySweepStrategy(LiquiditySweepStrategy)`** — same zone
+gate, paired with the strategy family it's the actual conceptual fit
+for: entries here fire *after* a liquidity sweep + reversal, which
+structurally lands much closer to a range extreme than a breakout does.
+Fixed defaults, full history, no optimization:
+- US30: 47 trades/+0.03%/34.0% win → **5 trades/-4.42%/0% win**. Sample
+  size (5 trades) is too small to conclude anything from directly.
+- Gold: 70 trades/+3.39%/37.1% win → 15 trades/+1.90%/40.0% win. Win
+  rate improved, total return and trade count both dropped.
+
+**Verdict, stated plainly: inconclusive.** The zone gate is a much
+better philosophical fit for the reversal strategy than the breakout
+one (confirmed, not assumed), but neither quick fixed-defaults test
+shows a clean improvement - trade counts collapse by 80-90% in every
+pairing, and returns don't clearly improve to compensate. This was
+fixed-defaults testing only (matching how `LiquiditySweepStrategy`
+itself was first evaluated, per the Layer 4 section above) - a proper
+walk-forward optimization pass (same rigor as every other headline
+number in this document) is the only way to give this a final verdict,
+and hasn't been run - the fixed-defaults signal so far didn't clearly
+justify the time cost (walk-forward over full history takes minutes per
+instrument, per the section above).
+
+**Decision (2026-07-26, user's call)**: commit the infrastructure -
+`premium_discount_zone()`/`trading_session()`/both `_extra_gates_ok()`
+hooks/both new SMC-gated classes - since they're real, tested, and
+reusable regardless of this specific idea's verdict. Leave the zone
+gate **off by default**: `run_scheduled.py` and `live_monitor.py` keep
+using `RegimeConfluenceStrategy`, unaffected and unchanged by any of
+this. `SMCZoneConfluenceStrategy`/`SMCZoneLiquiditySweepStrategy` exist
+as opt-in classes for a future proper walk-forward evaluation, not
+production defaults.
