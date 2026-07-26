@@ -106,6 +106,7 @@ from . import (
     build_live_features, LiveCircuitBreaker, _swing_high, _swing_low,
     account_summary, get_position_info,
 )
+from ..l2_features import macd as _macd
 from .run_scheduled import TIMEFRAME, PARAMS, MAGIC
 from .manual_overrides import load_overrides, set_bias, set_key_level, set_paused_now
 
@@ -145,11 +146,16 @@ MA_MACRO_2 = "#4a6080"
 ER_LINE = "#ce93d8"
 ER_THRESH = "#ffab00"
 ACCENT_CYAN = "#00e5ff"  # header banner / "// TAG" captions
-AXIS_LABEL = "#ffffff"  # Price/ER/MACD y-axis word labels (2026-07-26: the
+AXIS_LABEL = ACCENT_CYAN  # Price/ER/MACD y-axis word labels (2026-07-26: the
 # style's default text.color (TEXT, a pale blue-gray) read as washed-out/
 # low-contrast next to the bright-cyan "// CAPTION" text directly above -
 # bumped these specifically to pure white rather than changing TEXT itself,
 # since TEXT is still used plenty of other places that weren't flagged.
+# 2026-07-26, later: white read as "dimmed" against the dark background -
+# switched to ACCENT_CYAN (same color already used for the "// ER —
+# REGIME GATE" / "// MACD — MOMENTUM" captions right above them, and
+# close to MOOD_MA's blue) and dropped bold, per user's call - see the
+# fontweight="normal" change right below where this is applied.
 
 # Their web fonts (Orbitron/Share Tech Mono/Rajdhani) aren't installed
 # system fonts, so matplotlib can't see them out of the box - falls back
@@ -256,7 +262,25 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
         _style_axes(ax)
 
     er_threshold_line = pd.Series(PARAMS["er_threshold"], index=chart_df.index)
-    macd_colors = [UP if v > 0 else DOWN for v in chart_df["macd_hist"].fillna(0)]
+
+    # Display-only MACD(5,13,9) (2026-07-26, user's call - wanted a faster
+    # MACD than the strategy's own; originally asked for (5,13,1) but a
+    # 1-period signal EMA is mathematically identical to the MACD line
+    # itself - alpha=1 means no smoothing happens at all - so the
+    # histogram (MACD minus signal) would always be exactly zero and the
+    # panel would render blank. Confirmed by test render, then the user
+    # chose signal=9 (the standard smoothing) over the literal 1.
+    # Computed HERE, independently of chart_df["macd_hist"]. That column
+    # comes from build_live_features()'s macd(d["close"]) call, which
+    # uses l2_features.macd's walk-forward-tested default (12,26,9) and IS
+    # what RegimeConfluenceStrategy's actual entry rule gates on
+    # (macd_bull/macd_bear in l4_signal_model.py). Retuning the shared
+    # default would silently retune the live strategy itself, not
+    # just this chart - not something to do as a side effect of a
+    # cosmetic ask. So the fast-reacting (5,13,9) view lives only in this
+    # plot; the mechanical signal keeps evaluating (12,26,9) untouched.
+    _, _, display_macd_hist = _macd(chart_df["Close"], fast=5, slow=13, signal=9)
+    macd_colors = [UP if v > 0 else DOWN for v in display_macd_hist.fillna(0)]
 
     addplots = [
         mpf.make_addplot(chart_df["ema_8"], ax=price_ax, color=EMA_FAST, width=0.7, linestyle="--"),
@@ -268,7 +292,7 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
         mpf.make_addplot(swing_lo, ax=price_ax, color=DOWN, width=0.8, linestyle=":"),
         mpf.make_addplot(chart_df["er"], ax=er_ax, color=ER_LINE, width=1.3, ylabel=("ER" if show_ylabels else "")),
         mpf.make_addplot(er_threshold_line, ax=er_ax, color=ER_THRESH, width=0.9, linestyle="--"),
-        mpf.make_addplot(chart_df["macd_hist"], type="bar", ax=macd_ax, color=macd_colors, width=0.7,
+        mpf.make_addplot(display_macd_hist, type="bar", ax=macd_ax, color=macd_colors, width=0.7,
                           ylabel=("MACD" if show_ylabels else "")),
     ]
 
@@ -284,7 +308,7 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
     if show_ylabels:
         for ax in (price_ax, er_ax, macd_ax):
             ax.yaxis.label.set_color(AXIS_LABEL)
-            ax.yaxis.label.set_fontweight("bold")
+            ax.yaxis.label.set_fontweight("normal")
 
     er_ax.axhspan(PARAMS["er_threshold"], 1.0, color=UP, alpha=0.10)
     er_ax.set_ylim(0, 1)
@@ -572,12 +596,24 @@ def _build_controls(fig, panel_left: float, panel_width: float, symbols: list[tu
         pause_btn.on_clicked(_make_pause_callback(symbol_key, pause_btn))
         cursor -= (pause_h + 0.006)
 
+        # 2026-07-26: tb_up_ax/tb_down_ax get a bit more x_inset than
+        # radio_ax/pause_ax (0.035 vs the default 0.025), and a much
+        # shorter label ("up"/"dn" instead of "inv-up"/"inv-dn") - TextBox
+        # draws its own label OUTSIDE (to the left of) its axes, anchored
+        # at -label_pad in the axes' own fraction coordinates, so a long
+        # label at the default inset pushed its left edge past panel_left
+        # - i.e. past the blue quadrant border into the chart area (user
+        # screenshot). Shortening the text does most of the work; the
+        # small inset bump is just margin, and stays well clear of
+        # panel_width going negative (checked against the narrowest
+        # realistic panel_width, ~0.13 fig-fraction for a 2-symbol layout).
+        tb_x_inset = 0.035
         tb_h = 0.022
         levels = overrides["key_levels"].get(symbol_key, {})
         up_val = levels.get("invalidation_up")
-        tb_up_ax = fig.add_axes(_panel_rect(panel_left, panel_width, cursor, tb_h))
+        tb_up_ax = fig.add_axes(_panel_rect(panel_left, panel_width, cursor, tb_h, x_inset=tb_x_inset))
         tb_up_ax.set_in_layout(False)
-        tb_up = TextBox(tb_up_ax, "inv-up  ", initial=("" if up_val is None else str(up_val)),
+        tb_up = TextBox(tb_up_ax, "up  ", initial=("" if up_val is None else str(up_val)),
                          color=BG, hovercolor=PANEL_EDGE, label_pad=0.02)
         tb_up.label.set_color(TEXT_MUTED)
         tb_up.label.set_fontsize(7.5)
@@ -588,9 +624,9 @@ def _build_controls(fig, panel_left: float, panel_width: float, symbols: list[tu
         cursor -= (tb_h + 0.004)
 
         down_val = levels.get("invalidation_down")
-        tb_down_ax = fig.add_axes(_panel_rect(panel_left, panel_width, cursor, tb_h))
+        tb_down_ax = fig.add_axes(_panel_rect(panel_left, panel_width, cursor, tb_h, x_inset=tb_x_inset))
         tb_down_ax.set_in_layout(False)
-        tb_down = TextBox(tb_down_ax, "inv-dn  ", initial=("" if down_val is None else str(down_val)),
+        tb_down = TextBox(tb_down_ax, "dn  ", initial=("" if down_val is None else str(down_val)),
                            color=BG, hovercolor=PANEL_EDGE, label_pad=0.02)
         tb_down.label.set_color(TEXT_MUTED)
         tb_down.label.set_fontsize(7.5)
