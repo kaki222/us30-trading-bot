@@ -306,11 +306,30 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
     macd_ax.set_xticklabels(date_labels, rotation=45, ha="right", fontsize=8, color=TEXT_MUTED)
 
     title_color = DOWN if info["cooldown"] else (UP if info["regime"] == "TRENDING" else TEXT_MUTED)
-    price_ax.set_title(
-        f"{symbol_key} ({timeframe})  close={info['close']:.2f}  ER={info['er']:.2f} "
-        f"[{info['regime']}]  bias={info['bias']}  breaker={'COOLDOWN' if info['cooldown'] else 'clear'}",
-        fontsize=11, fontweight="bold", loc="left", color=title_color,
-    )
+    breaker_txt = "COOLDOWN" if info["cooldown"] else "clear"
+    line1 = f"{symbol_key} ({timeframe})  close={info['close']:.2f}  ER={info['er']:.2f} [{info['regime']}]"
+    line2 = f"bias={info['bias']}  breaker={breaker_txt}"
+
+    # Column titles used to be one fixed-size line regardless of how wide
+    # the actual window was - fine at this file's original full-size
+    # design width, but resizing/docking the window to something
+    # narrower (get_size_inches() genuinely shrinks on an interactive
+    # backend resize, unlike the axes' figure-fraction position) left the
+    # same point-sized text taking up a growing share of a shrinking
+    # column, until neighboring columns' titles started overlapping -
+    # exactly what showed up when docked to half a screen (2026-07-26).
+    # Recomputed every redraw (not just once) so it tracks whatever the
+    # CURRENT window size is, not the size at startup.
+    fig_width_in = price_ax.figure.get_size_inches()[0]
+    col_width_in = fig_width_in * price_ax.get_position().width
+    if col_width_in >= 5.5:
+        title_text, fontsize = f"{line1}  {line2}", 11
+    elif col_width_in >= 3.0:
+        title_text, fontsize = f"{line1}  {line2}", 9
+    else:
+        title_text, fontsize = f"{line1}\n{line2}", 8
+
+    price_ax.set_title(title_text, fontsize=fontsize, fontweight="bold", loc="left", color=title_color)
     return info
 
 
@@ -377,11 +396,25 @@ def _panel_rect(panel_left: float, panel_width: float, y_top: float, height: flo
 # earlier version of this did (hardcoded numbers in both places disagreed
 # by enough for the controls' "// SYMBOL" label to overlap the text box's
 # bottom border).
+#
+# 2026-07-26: compressed from the original PANEL_BOTTOM=0.04 (content ran
+# almost to the literal bottom edge of the window) so that EVERYTHING -
+# header, charts, and this side panel - lives in the upper ~70% of the
+# window (y >= RESERVED_BAND_TOP), leaving the bottom ~30% deliberately
+# blank and reserved (per the user's request) for a future addition -
+# candidate: a running-positions table. All the constants below were
+# scaled down together by the same ~0.69 factor from their original
+# values so nothing inside a control block (radio/pause/two textboxes)
+# overlaps - shrinking the outer two (TEXT_BLOCK_HEIGHT/CONTROL_BLOCK_HEIGHT)
+# alone without shrinking _build_controls' internal widget heights would
+# have reintroduced the exact overlap bug this layout was fixed for
+# before (see the "live_monitor.py dashboard rebuild" ARCHITECTURE.md entry).
+RESERVED_BAND_TOP = 0.30  # y < this is the reserved-for-later bottom 30%
 PANEL_TOP = 0.90
-PANEL_BOTTOM = 0.04
-TEXT_BLOCK_HEIGHT = 0.26
-CONTROL_BLOCK_HEIGHT = 0.26
-BLOCK_GAP = 0.03
+PANEL_BOTTOM = RESERVED_BAND_TOP
+TEXT_BLOCK_HEIGHT = 0.18
+CONTROL_BLOCK_HEIGHT = 0.18
+BLOCK_GAP = 0.02
 
 
 def _build_controls(fig, panel_left: float, panel_width: float, symbols: list[tuple[str, str]], y_top: float) -> dict:
@@ -410,9 +443,9 @@ def _build_controls(fig, panel_left: float, panel_width: float, symbols: list[tu
         fig.text(panel_left + 0.025, block_top, f"// {symbol_key} — MANUAL OVERRIDE",
                   fontsize=8, fontfamily=MONO, color=ACCENT_CYAN, ha="left", va="top")
 
-        cursor = block_top - 0.032  # clears the label row above before the first widget
+        cursor = block_top - 0.022  # clears the label row above before the first widget
 
-        radio_h = 0.10
+        radio_h = 0.07
         radio_ax = fig.add_axes(_panel_rect(panel_left, panel_width, cursor, radio_h))
         radio_ax.set_in_layout(False)
         radio_ax.set_facecolor(BG)
@@ -426,9 +459,9 @@ def _build_controls(fig, panel_left: float, panel_width: float, symbols: list[tu
             lbl.set_fontsize(8)
             lbl.set_fontfamily(MONO)
         radio.on_clicked(_make_bias_callback(symbol_key))
-        cursor -= (radio_h + 0.008)
+        cursor -= (radio_h + 0.006)
 
-        pause_h = 0.032
+        pause_h = 0.022
         pause_ax = fig.add_axes(_panel_rect(panel_left, panel_width, cursor, pause_h))
         pause_ax.set_in_layout(False)
         is_paused = overrides["paused_now"].get(symbol_key, False)
@@ -438,9 +471,9 @@ def _build_controls(fig, panel_left: float, panel_width: float, symbols: list[tu
         pause_btn.label.set_fontsize(8)
         pause_btn.label.set_fontfamily(MONO)
         pause_btn.on_clicked(_make_pause_callback(symbol_key, pause_btn))
-        cursor -= (pause_h + 0.008)
+        cursor -= (pause_h + 0.006)
 
-        tb_h = 0.032
+        tb_h = 0.022
         levels = overrides["key_levels"].get(symbol_key, {})
         up_val = levels.get("invalidation_up")
         tb_up_ax = fig.add_axes(_panel_rect(panel_left, panel_width, cursor, tb_h))
@@ -453,7 +486,7 @@ def _build_controls(fig, panel_left: float, panel_width: float, symbols: list[tu
         tb_up.text_disp.set_color(TEXT)
         tb_up.text_disp.set_fontfamily(MONO)
         tb_up.on_submit(_make_key_level_callback(symbol_key, "invalidation_up", tb_up))
-        cursor -= (tb_h + 0.005)
+        cursor -= (tb_h + 0.004)
 
         down_val = levels.get("invalidation_down")
         tb_down_ax = fig.add_axes(_panel_rect(panel_left, panel_width, cursor, tb_h))
@@ -556,7 +589,16 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
     panel_ax.set_in_layout(False)
     controls = _build_controls(fig, panel_left, panel_width, symbols, y_top=text_bottom - BLOCK_GAP)
 
-    HEADER_RECT = (0, 0, grid_width_in / total_width_in, 0.93)  # tight_layout only owns the chart grid
+    # tight_layout only owns the chart grid, and only the upper ~70% of the
+    # window (bottom=RESERVED_BAND_TOP, not 0 as before 2026-07-26) - the
+    # rest is deliberately blank, reserved for a future addition (candidate:
+    # a running-positions table). Squeezing the full 3-row grid into
+    # whatever height was available regardless of window shape was also
+    # the direct cause of the growing-dead-space-between-panels look when
+    # the window got resized to an unusual (e.g. tall, half-screen) aspect
+    # ratio - giving tight_layout a smaller, fixed vertical budget to work
+    # with makes its auto-spacing choices less extreme in those cases too.
+    HEADER_RECT = (0, RESERVED_BAND_TOP, grid_width_in / total_width_in, 0.93)
 
     def _on_resize(_event):
         # Without this, resizing/snapping the window only re-flows text
@@ -576,6 +618,13 @@ def run(refresh_seconds: int = 60, bars: int = 150, timeframe: str | None = None
     fig.text(0.01, 0.975, "US30-TRADING-BOT  //  LIVE MONITOR", fontsize=12, fontweight="bold",
              fontfamily=HEADER_FONT, color=ACCENT_CYAN, ha="left", va="top")
     header_right = fig.text(0.99, 0.975, "", fontsize=9, fontfamily=MONO, color=UP, ha="right", va="top")
+
+    # Bottom ~30% (y < RESERVED_BAND_TOP) is deliberately empty - see
+    # HEADER_RECT/PANEL_TOP comments above. Labeled rather than left as
+    # unexplained blank space, so it reads as "reserved for later" instead
+    # of looking like a layout bug.
+    fig.text(0.01, RESERVED_BAND_TOP - 0.03, "// RESERVED — running positions (planned)",
+              fontsize=8, fontfamily=MONO, color=TEXT_MUTED, ha="left", va="top")
 
     plt.show(block=False)
 
