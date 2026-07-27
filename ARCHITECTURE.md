@@ -813,6 +813,23 @@ new was added to what these can do: still mute/downsize/skip only, never
 place or size a real order — `place_trade()`/`run_once()` are never
 called from this file.
 
+**Charts** (added same day, after the user asked for the ER/MACD/price
+charts too, not just numbers): `GET /api/chart/<symbol_key>.png` renders
+the same price+EMA8/EMA21/MA89/MA200/MA360+swing-hi/lo, ER, and MACD
+panels `live_monitor.py`'s desktop window draws — by calling
+`live_monitor.py`'s own `_redraw_column()` against a throwaway Agg-backend
+figure and returning the PNG bytes, rather than reimplementing the
+drawing logic a second time. matplotlib's backend is set to `"Agg"`
+(headless, buffer-only) at the very top of `mobile_api.py`, before
+`live_monitor` gets imported anywhere — this process never opens a real
+GUI window, unlike running `live_monitor.py` directly. The frontend polls
+this on the same ~10s cadence as `/api/status`, pre-loading each new PNG
+into a throwaway `Image()` before swapping it in so the visible chart
+doesn't flash blank while the next one renders — it's a snapshot, not
+interactive (no pinch-zoom/pan like the desktop window's toolbar), by
+design: simplicity and drawing-code reuse over a client-side charting
+library.
+
 **Auth**: a random token, generated once into `data/mobile_token.txt`
 (gitignored) on first run, required (via `?token=` or an `X-Auth-Token`
 header) on the three POST endpoints only — not meant to withstand a real
@@ -844,10 +861,15 @@ that storage is cleared.
 the actual Flask app through its test client — status/journal shape, all
 three POST endpoints rejecting a missing/wrong token then actually writing
 through to `manual_overrides.json` when given the right one, bad
-symbol/value rejected with 400, and the static frontend/manifest/icon
-files actually being served. All passing as of this writing. The frontend
-itself (`index.html`'s JS) has not been exercised in a real browser — only
-the backend it talks to.
+symbol/value rejected with 400, the chart endpoint returning real PNG
+bytes (magic-byte checked) for a known symbol and 404 for an unknown one,
+and the static frontend/manifest/icon files actually being served. Note
+the chart path needed mocking `live_monitor`'s *own* `build_live_features`/
+`LiveCircuitBreaker` bindings too, separately from `mobile_api`'s — each
+module's `from . import X` binds its own local name, so patching one
+doesn't reach code running inside the other. All passing as of this
+writing. The frontend itself (`index.html`'s JS) has not been exercised in
+a real browser — only the backend it talks to.
 
 ### Testing this yourself (I cannot do this part)
 

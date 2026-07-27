@@ -58,16 +58,29 @@ Needs Flask in addition to what run_scheduled.py already needs:
 from __future__ import annotations
 
 import argparse
+import io
 import secrets
 from pathlib import Path
 
 import pandas as pd
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, Response
+
+# Agg (non-interactive, file/buffer-only) backend, set BEFORE live_monitor
+# (or anything else) gets a chance to `import matplotlib.pyplot` — this
+# process is a headless server, so the normal interactive backend
+# live_monitor.py uses when run standalone (TkAgg/QtAgg, opens a real
+# window) would either fail with no display attached or, worse, try to
+# actually open a GUI window on whatever machine runs this. matplotlib's
+# backend is a process-wide global set on first pyplot import, so this
+# has to happen here, first, before the `from . import live_monitor` below.
+import matplotlib
+matplotlib.use("Agg")
 
 from . import (
     connect, shutdown, SYMBOL_MAP, TIMEFRAME_SECONDS,
     build_live_features, LiveCircuitBreaker, account_summary, get_position_info,
 )
+from . import live_monitor as lm
 from .run_scheduled import TIMEFRAME, PARAMS, MAGIC
 from .manual_overrides import load_overrides, set_bias, set_key_level, set_paused_now
 from .journal import read_entries
@@ -124,6 +137,46 @@ def _regime_snapshot(symbol_key: str) -> dict:
         "regime": regime,
         "cooldown": breaker.in_cooldown(),
     }
+
+
+def _render_chart_png(symbol_key: str, bars: int, visible_bars: int) -> bytes:
+    """
+    Same chart live_monitor.py's desktop window draws for one symbol —
+    price + EMA8/EMA21/MA89/MA200/MA360 + swing hi/lo, ER, and MACD — but
+    rendered once to a PNG buffer instead of an interactive window. Reuses
+    live_monitor.py's own `_redraw_column()` (its exact drawing code,
+    colors, and the display-only MACD(5,13,9)) rather than re-implementing
+    any of it here, so the phone's chart always matches the desktop
+    dashboard's — one drawing function, two outputs (a live window vs. a
+    PNG snapshot), not two copies of the plotting logic to keep in sync.
+    """
+    symbol = SYMBOL_MAP[symbol_key]
+    fig, (price_ax, er_ax, macd_ax) = lm.plt.subplots(
+        nrows=3, ncols=1, figsize=(7.2, 8.6),
+        gridspec_kw={"height_ratios": [3, 1, 1]}, sharex=True,
+    )
+    fig.patch.set_facecolor(lm.BG)
+    bias = load_overrides()["bias"].get(symbol_key)
+    lm._redraw_column(
+        symbol_key, symbol, price_ax, er_ax, macd_ax, bars, TIMEFRAME, visible_bars,
+        {}, bias, show_ylabels=True, n_columns=1, panel_width_in=0.0,
+    )
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", facecolor=lm.BG, dpi=130)
+    lm.plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+@app.route("/api/chart/<symbol_key>.png")
+def api_chart(symbol_key):
+    if symbol_key not in SYMBOL_MAP:
+        return jsonify({"error": f"unknown symbol_key {symbol_key!r}"}), 404
+    bars = int(request.args.get("bars", 150))
+    visible_bars = int(request.args.get("visible_bars", 40))
+    png = _render_chart_png(symbol_key, bars, visible_bars)
+    return Response(png, mimetype="image/png", headers={"Cache-Control": "no-store"})
 
 
 @app.route("/api/status")

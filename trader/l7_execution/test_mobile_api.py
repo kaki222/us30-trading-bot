@@ -25,6 +25,7 @@ _tmp_data = Path(tempfile.mkdtemp()) / "data"
 _tmp_data.mkdir(parents=True)
 
 from trader.l7_execution import mobile_api as api
+from trader.l7_execution import live_monitor as lm
 from trader.l7_execution import manual_overrides as mo
 from trader.l7_execution import journal as jr
 
@@ -56,8 +57,10 @@ close = 4000 + np.cumsum(rng.normal(0, 5, N))
 def fake_build_live_features(symbol, er_length=20, timeframe=None, count=800):
     return pd.DataFrame({
         "Open": close, "High": close + 2, "Low": close - 2, "Close": close,
+        "Volume": np.full(N, 1000.0),
         "ma_360": pd.Series(close).rolling(10, min_periods=1).mean(),
         "ma_200": pd.Series(close).rolling(10, min_periods=1).mean(),
+        "ma_89": pd.Series(close).rolling(10, min_periods=1).mean(),
         "ema_21": pd.Series(close).ewm(span=21).mean(),
         "ema_8": pd.Series(close).ewm(span=8).mean(),
         "macd_hist": rng.normal(0, 2, N),
@@ -90,6 +93,17 @@ api.account_summary = fake_account_summary
 api.get_position_info = fake_get_position_info
 api.LiveCircuitBreaker = FakeBreaker
 
+# /api/chart/<key>.png goes through lm._redraw_column(), which calls
+# live_monitor.py's OWN build_live_features/LiveCircuitBreaker bindings
+# (`from . import build_live_features, LiveCircuitBreaker` inside
+# live_monitor.py) - a separate name binding from mobile_api's, so
+# patching api.* above does not reach code running inside lm.*. Same
+# pattern render_layout_test.py uses for live_monitor.py directly.
+lm.connect = lambda path=None: None
+lm.shutdown = lambda: None
+lm.build_live_features = fake_build_live_features
+lm.LiveCircuitBreaker = FakeBreaker
+
 client = api.app.test_client()
 failures = []
 
@@ -111,6 +125,14 @@ check("GOLD has position", body["symbols"]["GOLD"]["position"]["direction"] == "
 check("ER is a float 0-1", 0.0 <= body["symbols"]["US30"]["er"] <= 1.0)
 check("regime is TRENDING or CHOP", body["symbols"]["US30"]["regime"] in ("TRENDING", "CHOP"))
 check("bias defaults to None (neutral)", body["symbols"]["US30"]["bias"] is None)
+
+# --- chart PNG (reuses live_monitor.py's own drawing code, Agg backend) ---
+r = client.get("/api/chart/US30.png")
+check("GET /api/chart/US30.png 200", r.status_code == 200)
+check("chart is a real PNG (magic bytes)", r.data[:8] == b"\x89PNG\r\n\x1a\n")
+check("chart content-type is image/png", r.content_type == "image/png")
+r = client.get("/api/chart/NOPE.png")
+check("unknown symbol chart -> 404", r.status_code == 404)
 
 # --- journal (empty at first) ---
 r = client.get("/api/journal")

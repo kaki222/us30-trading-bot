@@ -67,6 +67,13 @@
   .position.long { color: var(--up); }
   .position.short { color: var(--down); }
 
+  .chart-img {
+    display: block; width: 100%; height: auto; border: 1px solid var(--edge); border-radius: 4px;
+    margin-bottom: 6px; background: var(--bg);
+  }
+  .chart-loading { font-size: 10px; color: var(--muted); margin: -2px 0 8px; }
+  .chart-loading.hidden { display: none; }
+
   .section-label { font-size: 10px; color: var(--muted); letter-spacing: 0.05em; margin: 10px 0 4px; }
 
   .btn-row { display: flex; gap: 6px; }
@@ -236,6 +243,8 @@ function renderSymbols(symbols) {
         <span>MACD <b>${s.macd_hist == null ? "—" : (s.macd_hist >= 0 ? "+" : "") + fmtNum(s.macd_hist)}</b></span>
       </div>
       ${posLine}
+      <img class="chart-img" data-chart="${key}" alt="${key} chart" style="display:none">
+      <div class="chart-loading" data-chart-loading="${key}">// rendering chart…</div>
       <div class="section-label">// BIAS</div>
       <div class="btn-row" data-bias-row="${key}">
         <button class="btn long ${s.bias === "long" ? "active" : ""}" data-val="long">LONG</button>
@@ -304,6 +313,31 @@ function renderJournal(entries) {
   }).join("");
 }
 
+// ---- charts ----------------------------------------------------
+// Server-rendered PNGs (same drawing code as the desktop dashboard's
+// live_monitor.py window) — not interactive (no pinch/pan), just a
+// snapshot that refreshes on a timer. Preloads into a throwaway Image()
+// first and only swaps it in on load, so the visible chart doesn't flash
+// to blank while the next one renders server-side.
+function refreshChartImg(img) {
+  const key = img.getAttribute("data-chart");
+  const loadingEl = document.querySelector(`[data-chart-loading="${key}"]`);
+  const probe = new Image();
+  probe.onload = () => {
+    img.src = probe.src;
+    img.style.display = "block";
+    if (loadingEl) loadingEl.classList.add("hidden");
+  };
+  probe.onerror = () => {
+    if (loadingEl) { loadingEl.textContent = "// chart unavailable"; loadingEl.classList.remove("hidden"); }
+  };
+  probe.src = `/api/chart/${key}.png?ts=${Date.now()}`;
+}
+
+function refreshCharts() {
+  document.querySelectorAll(".chart-img").forEach(refreshChartImg);
+}
+
 // ---- polling ----------------------------------------------------
 async function fetchStatus() {
   try {
@@ -314,6 +348,7 @@ async function fetchStatus() {
     $("#acct-equity").textContent = fmtMoney(data.account.equity) + " " + data.account.currency;
     $("#acct-balance").textContent = fmtMoney(data.account.balance) + " " + data.account.currency;
     renderSymbols(data.symbols);
+    refreshCharts();
   } catch (e) {
     setConn(false);
   }
