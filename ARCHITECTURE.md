@@ -535,12 +535,20 @@ real week of entries accumulate before the weekly review means anything.
 ### Manual bias override + live monitor (2026-07-25)
 
 Grew out of a live discretionary GOLD chart read (Elliott/Wyckoff,
-worked through in chat, not in this repo) that landed on a genuine
-either/or: price either clears the ~4,164-4,180 shelf and keeps going
-(bullish), or fails there and eventually sweeps the ~3,958 low first
-(bearish). The mechanical strategy has no concept of that kind of
-discretionary read — it only sees ER/EMA/MACD/BOS. Two additions
-bridge the two without touching the strategy's actual rules:
+worked through in chat) that landed on a genuine either/or: price either
+clears the ~4,164-4,180 shelf and keeps going (bullish), or fails there
+and eventually sweeps the ~3,958 low first (bearish). The mechanical
+strategy has no concept of that kind of discretionary read — it only
+sees ER/EMA/MACD/BOS. Two additions bridge the two without touching the
+strategy's actual rules:
+
+Chart reads themselves (the wave counts, levels, and confirm/invalidate
+conditions worked out in chat, session by session) are now recorded in
+**`DISCRETIONARY_ANALYSIS.md`** (2026-07-27, repo root) rather than only
+living in scrollback — a dated log, not executed by any code, that gives
+the reasoning behind whatever bias/key-levels are currently set a paper
+trail. See that file for the full geometry; this section covers only the
+mechanism that lets a read there turn into an actual override.
 
 - `run_scheduled.py`'s `BIAS` dict — set `BIAS[symbol_key]` to `"long"`
   or `"short"` from your own chart read; leave `None` (the default) to
