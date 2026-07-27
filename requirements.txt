@@ -5,6 +5,7 @@ matplotlib
 mplfinance
 scikit-learn
 ipykernel
+flask  # Layer 7's mobile_api.py (phone dashboard) — see trader/l7_execution/mobile_api.py
 
 # Layer 7 (trader/l7_execution) needs MetaTrader5 — Windows-only, not
 # installable in this project's Linux dev sandbox, so it's deliberately

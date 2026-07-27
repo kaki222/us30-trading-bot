@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>US30 Bot Monitor</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0a0d12">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<style>
+  :root {
+    --bg: #0a0d12;
+    --panel: #0d1119;
+    --edge: #1e2d45;
+    --text: #c8d8f0;
+    --muted: #4a6080;
+    --up: #00e676;
+    --down: #ff1744;
+    --cyan: #00e5ff;
+    --mood: #2979ff;
+    --gold: #ffab00;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    background: var(--bg); color: var(--text); margin: 0; padding: 0;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 14px;
+    -webkit-user-select: none; user-select: none;
+  }
+  #app { max-width: 480px; margin: 0 auto; padding: 10px 12px 40px; }
+  header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 8px 2px 14px; border-bottom: 1px solid var(--edge); margin-bottom: 12px;
+  }
+  header h1 { font-size: 13px; letter-spacing: 0.04em; color: var(--cyan); margin: 0; font-weight: 500; }
+  #conn { font-size: 11px; }
+  #conn.live { color: var(--up); }
+  #conn.down { color: var(--down); }
+
+  .card {
+    border: 1px solid var(--edge); border-radius: 6px; background: var(--panel);
+    padding: 12px; margin-bottom: 12px;
+  }
+  .card h2 {
+    font-size: 12px; color: var(--cyan); margin: 0 0 8px; font-weight: 500; letter-spacing: 0.03em;
+  }
+  .acct-row { display: flex; justify-content: space-between; padding: 2px 0; color: var(--muted); }
+  .acct-row b { color: var(--text); font-weight: 500; }
+
+  .sym-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .sym-name { font-size: 15px; font-weight: 500; color: var(--text); }
+  .sym-close { font-size: 15px; color: var(--text); }
+  .badge {
+    display: inline-block; font-size: 10px; padding: 2px 6px; border-radius: 3px;
+    border: 1px solid currentColor; margin-left: 6px;
+  }
+  .badge.trending { color: var(--up); }
+  .badge.chop { color: var(--gold); }
+  .badge.warming { color: var(--muted); }
+  .badge.cooldown { color: var(--down); }
+
+  .metrics { display: flex; gap: 16px; color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  .metrics b { color: var(--text); }
+
+  .position { font-size: 12px; margin-bottom: 10px; color: var(--muted); }
+  .position.long { color: var(--up); }
+  .position.short { color: var(--down); }
+
+  .section-label { font-size: 10px; color: var(--muted); letter-spacing: 0.05em; margin: 10px 0 4px; }
+
+  .btn-row { display: flex; gap: 6px; }
+  .btn {
+    flex: 1; text-align: center; padding: 8px 4px; border-radius: 4px; border: 1px solid var(--edge);
+    background: transparent; color: var(--muted); font-size: 12px; font-family: inherit; cursor: pointer;
+  }
+  .btn.active { border-color: var(--cyan); color: var(--cyan); background: rgba(0,229,255,0.08); }
+  .btn.long.active { border-color: var(--up); color: var(--up); background: rgba(0,230,118,0.08); }
+  .btn.short.active { border-color: var(--down); color: var(--down); background: rgba(255,23,68,0.08); }
+
+  .pause-btn {
+    width: 100%; margin-top: 8px; padding: 8px; border-radius: 4px; border: 1px solid var(--edge);
+    background: transparent; color: var(--muted); font-size: 12px; font-family: inherit; cursor: pointer;
+  }
+  .pause-btn.paused { border-color: var(--down); color: var(--down); background: rgba(255,23,68,0.08); }
+
+  .levels { display: flex; gap: 8px; margin-top: 8px; }
+  .level-field { flex: 1; }
+  .level-field label { display: block; font-size: 10px; color: var(--muted); margin-bottom: 3px; }
+  .level-field input {
+    width: 100%; background: var(--bg); border: 1px solid var(--edge); color: var(--text);
+    font-family: inherit; font-size: 13px; padding: 6px; border-radius: 4px;
+  }
+  .level-field input:focus { border-color: var(--cyan); outline: none; }
+
+  #journal .entry { border-bottom: 1px solid var(--edge); padding: 6px 0; font-size: 11px; }
+  #journal .entry:last-child { border-bottom: none; }
+  #journal .entry .t { color: var(--muted); }
+  #journal .entry .action-trade { color: var(--up); }
+  #journal .entry .action-skip { color: var(--muted); }
+  #journal .empty { color: var(--muted); font-size: 12px; }
+
+  #token-gate {
+    position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column;
+    align-items: center; justify-content: center; padding: 24px; z-index: 100;
+  }
+  #token-gate p { color: var(--muted); font-size: 12px; text-align: center; max-width: 320px; }
+  #token-gate input {
+    width: 100%; max-width: 320px; background: var(--panel); border: 1px solid var(--edge); color: var(--text);
+    font-family: inherit; font-size: 14px; padding: 10px; border-radius: 4px; margin: 12px 0;
+  }
+  #token-gate button {
+    background: transparent; border: 1px solid var(--cyan); color: var(--cyan); padding: 10px 20px;
+    border-radius: 4px; font-family: inherit; font-size: 13px; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+
+<div id="token-gate" style="display:none">
+  <p>// AUTH TOKEN<br>Paste the token mobile_api.py printed on startup (or open the link it gave you).</p>
+  <input id="token-input" type="text" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="token">
+  <button onclick="saveTokenFromInput()">CONNECT</button>
+</div>
+
+<div id="app">
+  <header>
+    <h1>US30-TRADING-BOT // MOBILE</h1>
+    <span id="conn">connecting…</span>
+  </header>
+
+  <div class="card">
+    <h2>// ACCOUNT</h2>
+    <div class="acct-row"><span>equity</span><b id="acct-equity">—</b></div>
+    <div class="acct-row"><span>balance</span><b id="acct-balance">—</b></div>
+  </div>
+
+  <div id="symbols"></div>
+
+  <div class="card">
+    <h2>// JOURNAL — RECENT</h2>
+    <div id="journal"><div class="empty">loading…</div></div>
+  </div>
+</div>
+
+<script>
+const $ = (sel, root) => (root || document).querySelector(sel);
+
+// ---- token handling -------------------------------------------------
+function getToken() {
+  const url = new URL(window.location.href);
+  const urlToken = url.searchParams.get("token");
+  if (urlToken) {
+    localStorage.setItem("us30_token", urlToken);
+    url.searchParams.delete("token");
+    history.replaceState({}, "", url.pathname + url.hash);
+    return urlToken;
+  }
+  return localStorage.getItem("us30_token");
+}
+
+function saveTokenFromInput() {
+  const v = $("#token-input").value.trim();
+  if (!v) return;
+  localStorage.setItem("us30_token", v);
+  $("#token-gate").style.display = "none";
+  refreshAll();
+}
+
+let TOKEN = getToken();
+if (!TOKEN) {
+  $("#token-gate").style.display = "flex";
+} else {
+  refreshAll();
+}
+
+// ---- fetch helpers ----------------------------------------------------
+async function postJSON(path, body) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Auth-Token": TOKEN || "" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    alert("Error: " + (err.error || res.statusText));
+  }
+  return res.ok;
+}
+
+function setConn(ok) {
+  const el = $("#conn");
+  el.textContent = ok ? "● LIVE" : "● DISCONNECTED";
+  el.className = ok ? "live" : "down";
+}
+
+// ---- rendering ----------------------------------------------------
+function fmtMoney(v) {
+  if (v == null) return "—";
+  return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtNum(v, d) {
+  if (v == null) return "—";
+  return v.toFixed(d == null ? 2 : d);
+}
+function regimeBadgeClass(regime) {
+  if (regime === "TRENDING") return "trending";
+  if (regime === "CHOP") return "chop";
+  return "warming";
+}
+
+function renderSymbols(symbols) {
+  const container = $("#symbols");
+  container.innerHTML = "";
+  for (const [key, s] of Object.entries(symbols)) {
+    const card = document.createElement("div");
+    card.className = "card";
+
+    const posLine = !s.position ? `<div class="position">flat</div>` :
+      `<div class="position ${s.position.direction}">${s.position.direction.toUpperCase()} ${s.position.volume} lots &nbsp; P&amp;L ${fmtMoney(s.position.profit)}</div>`;
+
+    const up = s.key_levels && s.key_levels.invalidation_up != null ? s.key_levels.invalidation_up : "";
+    const dn = s.key_levels && s.key_levels.invalidation_down != null ? s.key_levels.invalidation_down : "";
+
+    card.innerHTML = `
+      <div class="sym-top">
+        <span class="sym-name">${key}</span>
+        <span class="sym-close">${fmtNum(s.close)}</span>
+      </div>
+      <div>
+        <span class="badge ${regimeBadgeClass(s.regime)}">${s.regime}</span>
+        ${s.cooldown ? '<span class="badge cooldown">COOLDOWN</span>' : ""}
+      </div>
+      <div class="metrics">
+        <span>ER <b>${fmtNum(s.er, 3)}</b></span>
+        <span>MACD <b>${s.macd_hist == null ? "—" : (s.macd_hist >= 0 ? "+" : "") + fmtNum(s.macd_hist)}</b></span>
+      </div>
+      ${posLine}
+      <div class="section-label">// BIAS</div>
+      <div class="btn-row" data-bias-row="${key}">
+        <button class="btn long ${s.bias === "long" ? "active" : ""}" data-val="long">LONG</button>
+        <button class="btn ${s.bias == null ? "active" : ""}" data-val="">NEUTRAL</button>
+        <button class="btn short ${s.bias === "short" ? "active" : ""}" data-val="short">SHORT</button>
+      </div>
+      <button class="pause-btn ${s.paused_now ? "paused" : ""}" data-pause="${key}">
+        ${s.paused_now ? "RESUME" : "PAUSE NOW"}
+      </button>
+      <div class="section-label">// KEY LEVELS</div>
+      <div class="levels">
+        <div class="level-field">
+          <label>invalidation up</label>
+          <input type="number" inputmode="decimal" data-level="${key}:invalidation_up" value="${up}">
+        </div>
+        <div class="level-field">
+          <label>invalidation down</label>
+          <input type="number" inputmode="decimal" data-level="${key}:invalidation_down" value="${dn}">
+        </div>
+      </div>
+    `;
+    container.appendChild(card);
+  }
+
+  container.querySelectorAll("[data-bias-row]").forEach(row => {
+    const symbolKey = row.getAttribute("data-bias-row");
+    row.querySelectorAll("button").forEach(btn => {
+      btn.onclick = async () => {
+        const val = btn.getAttribute("data-val") || null;
+        const ok = await postJSON("/api/bias", { symbol_key: symbolKey, value: val });
+        if (ok) fetchStatus();
+      };
+    });
+  });
+
+  container.querySelectorAll("[data-pause]").forEach(btn => {
+    btn.onclick = async () => {
+      const symbolKey = btn.getAttribute("data-pause");
+      const currentlyPaused = btn.classList.contains("paused");
+      const ok = await postJSON("/api/pause", { symbol_key: symbolKey, value: !currentlyPaused });
+      if (ok) fetchStatus();
+    };
+  });
+
+  container.querySelectorAll("[data-level]").forEach(input => {
+    input.onchange = async () => {
+      const [symbolKey, which] = input.getAttribute("data-level").split(":");
+      const raw = input.value.trim();
+      const ok = await postJSON("/api/key_level", { symbol_key: symbolKey, which, value: raw === "" ? null : parseFloat(raw) });
+      if (ok) fetchStatus();
+    };
+  });
+}
+
+function renderJournal(entries) {
+  const el = $("#journal");
+  if (!entries.length) { el.innerHTML = '<div class="empty">no entries yet</div>'; return; }
+  el.innerHTML = entries.map(e => {
+    const t = new Date(e.timestamp).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    const action = e.result && e.result.action;
+    const cls = action === "trade" ? "action-trade" : "action-skip";
+    const detail = action === "trade"
+      ? (e.result.signal && e.result.signal.signal ? e.result.signal.signal.toUpperCase() : "trade")
+      : (e.result && e.result.reason ? e.result.reason : "skip");
+    return `<div class="entry"><span class="t">${t}</span> &nbsp; <b>${e.symbol_key}</b> &nbsp; <span class="${cls}">${detail}</span></div>`;
+  }).join("");
+}
+
+// ---- polling ----------------------------------------------------
+async function fetchStatus() {
+  try {
+    const res = await fetch("/api/status");
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    setConn(true);
+    $("#acct-equity").textContent = fmtMoney(data.account.equity) + " " + data.account.currency;
+    $("#acct-balance").textContent = fmtMoney(data.account.balance) + " " + data.account.currency;
+    renderSymbols(data.symbols);
+  } catch (e) {
+    setConn(false);
+  }
+}
+
+async function fetchJournal() {
+  try {
+    const res = await fetch("/api/journal?n=15");
+    if (!res.ok) throw new Error(res.statusText);
+    renderJournal(await res.json());
+  } catch (e) { /* leave whatever was last rendered */ }
+}
+
+function refreshAll() {
+  fetchStatus();
+  fetchJournal();
+}
+
+if (TOKEN) {
+  refreshAll();
+  setInterval(fetchStatus, 10000);
+  setInterval(fetchJournal, 20000);
+}
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("service-worker.js").catch(() => {});
+}
+</script>
+</body>
+</html>

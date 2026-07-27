@@ -783,6 +783,72 @@ and "Create Task" needs a UAC prompt I genuinely cannot click through):
    the XM demo (345899957) for this to work - Task Scheduler runs the
    script, not the terminal.
 
+### Mobile app (PWA) — `mobile_api.py` (2026-07-27)
+
+User asked to "test the trading bot on my Android phone." Reality check
+that shaped this: MetaTrader5's Python package is Windows-only, wired to a
+locally-running MT5 terminal via COM/DLL calls — there is no MT5 Python
+API for Android (or Linux/Mac), so the bot's actual logic (connect(),
+build_live_features(), the scheduled cycle) has no way to run on a phone.
+An Android "app" can only ever be a *client* to the bot, not a port of it.
+
+Given that, and the user's choice of scope ("home WiFi only," not exposed
+to the open internet), the buildable path is: a small Flask server
+(`trader/l7_execution/mobile_api.py`) running as a third independent
+MT5-connected process alongside `run_scheduled.py`'s Task Scheduler job
+and `live_monitor.py` — same pattern as those two, its own `connect()`
+call, reading/writing the same `data/manual_overrides.json` and
+`data/journal.jsonl` — plus a mobile-friendly frontend
+(`trader/l7_execution/mobile_app/`) that Chrome on Android can
+"Add to Home Screen" into a real app icon (a PWA — `manifest.json` +
+icons + a no-op service worker, no Play Store needed).
+
+**What it exposes**: `GET /api/status` (account equity/balance, and per
+symbol: close/ER/regime/MACD/cooldown/bias/paused/key-levels/open
+position), `GET /api/journal` (recent entries, most-recent-first). And
+the *exact same safe controls* `live_monitor.py`'s buttons already call —
+`POST /api/bias`, `/api/pause`, `/api/key_level` — thin wrappers around
+`manual_overrides.set_bias()/set_paused_now()/set_key_level()`. Nothing
+new was added to what these can do: still mute/downsize/skip only, never
+place or size a real order — `place_trade()`/`run_once()` are never
+called from this file.
+
+**Auth**: a random token, generated once into `data/mobile_token.txt`
+(gitignored) on first run, required (via `?token=` or an `X-Auth-Token`
+header) on the three POST endpoints only — not meant to withstand a real
+attacker, just to stop another device on the same WiFi from flipping bias/
+pause without it, matching the "home WiFi only" scope this was explicitly
+built for. GET endpoints are unauthenticated (read-only numbers off a
+demo account, same sensitivity as what's already visible in
+`live_monitor.py`'s window). If this is ever opened to the open internet
+instead of just home WiFi, that token is not sufficient on its own — needs
+a real auth layer (and a tunnel like Tailscale, not port-forwarding)
+first, not something to default into.
+
+**Run it** (own process, own terminal window, alongside the others):
+
+    (venv) PS> pip install flask
+    (venv) PS> python -m trader.l7_execution.mobile_api "C:\path\to\terminal64.exe"
+
+Prints the token and a URL. On the phone (same WiFi): open that URL in
+Chrome, then menu → "Add to Home Screen." Whether Chrome offers full
+chrome-less standalone install (a WebAPK) vs. a plain bookmark-style
+shortcut can depend on install-criteria details on plain HTTP (no TLS,
+deliberately, given the home-WiFi-only scope) — either way it's a one-tap
+icon, no URL typing needed after the first visit; the token is saved to
+the phone's `localStorage` on first load so it isn't needed again unless
+that storage is cleared.
+
+**Verified**: `test_mobile_api.py` (same mocked-MT5 pattern as
+`test_run_once.py` etc., runs on Linux, no real terminal needed) drives
+the actual Flask app through its test client — status/journal shape, all
+three POST endpoints rejecting a missing/wrong token then actually writing
+through to `manual_overrides.json` when given the right one, bad
+symbol/value rejected with 400, and the static frontend/manifest/icon
+files actually being served. All passing as of this writing. The frontend
+itself (`index.html`'s JS) has not been exercised in a real browser — only
+the backend it talks to.
+
 ### Testing this yourself (I cannot do this part)
 
 On the Windows machine with the MT5 terminal, logged into an XM demo
