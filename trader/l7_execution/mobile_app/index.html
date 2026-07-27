@@ -216,80 +216,85 @@ function regimeBadgeClass(regime) {
   return "warming";
 }
 
+// Cards are built ONCE per symbol and updated in place on every refresh
+// (2026-07-27, fixed from an earlier version that did
+// container.innerHTML = "" + a full rebuild every ~10s poll) — that
+// destroyed and recreated the chart <img> every cycle (visible as the
+// chart flashing to blank/"rendering..." on every refresh, reported by
+// the user), and would just as badly have wiped out any key-level value
+// you were mid-typing. Building once and only touching the specific
+// fields that changed fixes both: the chart element persists across
+// status polls (only refreshChartImg(), on its own cadence, ever touches
+// its src), and an input you're actively focused on is left alone even
+// if a poll lands mid-edit.
+const _cardBuilt = new Set();
+
 function renderSymbols(symbols) {
   const container = $("#symbols");
-  container.innerHTML = "";
   for (const [key, s] of Object.entries(symbols)) {
-    const card = document.createElement("div");
-    card.className = "card";
-
-    const posLine = !s.position ? `<div class="position">flat</div>` :
-      `<div class="position ${s.position.direction}">${s.position.direction.toUpperCase()} ${s.position.volume} lots &nbsp; P&amp;L ${fmtMoney(s.position.profit)}</div>`;
-
-    const up = s.key_levels && s.key_levels.invalidation_up != null ? s.key_levels.invalidation_up : "";
-    const dn = s.key_levels && s.key_levels.invalidation_down != null ? s.key_levels.invalidation_down : "";
-
-    card.innerHTML = `
-      <div class="sym-top">
-        <span class="sym-name">${key}</span>
-        <span class="sym-close">${fmtNum(s.close)}</span>
-      </div>
-      <div>
-        <span class="badge ${regimeBadgeClass(s.regime)}">${s.regime}</span>
-        ${s.cooldown ? '<span class="badge cooldown">COOLDOWN</span>' : ""}
-      </div>
-      <div class="metrics">
-        <span>ER <b>${fmtNum(s.er, 3)}</b></span>
-        <span>MACD <b>${s.macd_hist == null ? "—" : (s.macd_hist >= 0 ? "+" : "") + fmtNum(s.macd_hist)}</b></span>
-      </div>
-      ${posLine}
-      <img class="chart-img" data-chart="${key}" alt="${key} chart" style="display:none">
-      <div class="chart-loading" data-chart-loading="${key}">// rendering chart…</div>
-      <div class="section-label">// BIAS</div>
-      <div class="btn-row" data-bias-row="${key}">
-        <button class="btn long ${s.bias === "long" ? "active" : ""}" data-val="long">LONG</button>
-        <button class="btn ${s.bias == null ? "active" : ""}" data-val="">NEUTRAL</button>
-        <button class="btn short ${s.bias === "short" ? "active" : ""}" data-val="short">SHORT</button>
-      </div>
-      <button class="pause-btn ${s.paused_now ? "paused" : ""}" data-pause="${key}">
-        ${s.paused_now ? "RESUME" : "PAUSE NOW"}
-      </button>
-      <div class="section-label">// KEY LEVELS</div>
-      <div class="levels">
-        <div class="level-field">
-          <label>invalidation up</label>
-          <input type="number" inputmode="decimal" data-level="${key}:invalidation_up" value="${up}">
-        </div>
-        <div class="level-field">
-          <label>invalidation down</label>
-          <input type="number" inputmode="decimal" data-level="${key}:invalidation_down" value="${dn}">
-        </div>
-      </div>
-    `;
-    container.appendChild(card);
+    if (!_cardBuilt.has(key)) {
+      container.appendChild(buildSymbolCard(key));
+      _cardBuilt.add(key);
+    }
+    updateSymbolCard(key, s);
   }
+}
 
-  container.querySelectorAll("[data-bias-row]").forEach(row => {
-    const symbolKey = row.getAttribute("data-bias-row");
-    row.querySelectorAll("button").forEach(btn => {
-      btn.onclick = async () => {
-        const val = btn.getAttribute("data-val") || null;
-        const ok = await postJSON("/api/bias", { symbol_key: symbolKey, value: val });
-        if (ok) fetchStatus();
-      };
-    });
-  });
+function buildSymbolCard(key) {
+  const card = document.createElement("div");
+  card.className = "card";
+  card.id = `card-${key}`;
+  card.innerHTML = `
+    <div class="sym-top">
+      <span class="sym-name">${key}</span>
+      <span class="sym-close" data-f="close">—</span>
+    </div>
+    <div>
+      <span class="badge" data-f="regime"></span>
+      <span class="badge cooldown" data-f="cooldown" style="display:none">COOLDOWN</span>
+    </div>
+    <div class="metrics">
+      <span>ER <b data-f="er">—</b></span>
+      <span>MACD <b data-f="macd">—</b></span>
+    </div>
+    <div class="position" data-f="position">flat</div>
+    <img class="chart-img" data-chart="${key}" alt="${key} chart" style="display:none">
+    <div class="chart-loading" data-chart-loading="${key}">// rendering chart…</div>
+    <div class="section-label">// BIAS</div>
+    <div class="btn-row" data-bias-row="${key}">
+      <button class="btn long" data-val="long">LONG</button>
+      <button class="btn" data-val="">NEUTRAL</button>
+      <button class="btn short" data-val="short">SHORT</button>
+    </div>
+    <button class="pause-btn" data-pause="${key}">PAUSE NOW</button>
+    <div class="section-label">// KEY LEVELS</div>
+    <div class="levels">
+      <div class="level-field">
+        <label>invalidation up</label>
+        <input type="number" inputmode="decimal" data-level="${key}:invalidation_up">
+      </div>
+      <div class="level-field">
+        <label>invalidation down</label>
+        <input type="number" inputmode="decimal" data-level="${key}:invalidation_down">
+      </div>
+    </div>
+  `;
 
-  container.querySelectorAll("[data-pause]").forEach(btn => {
+  card.querySelectorAll("[data-bias-row] button").forEach(btn => {
     btn.onclick = async () => {
-      const symbolKey = btn.getAttribute("data-pause");
-      const currentlyPaused = btn.classList.contains("paused");
-      const ok = await postJSON("/api/pause", { symbol_key: symbolKey, value: !currentlyPaused });
+      const val = btn.getAttribute("data-val") || null;
+      const ok = await postJSON("/api/bias", { symbol_key: key, value: val });
       if (ok) fetchStatus();
     };
   });
 
-  container.querySelectorAll("[data-level]").forEach(input => {
+  card.querySelector("[data-pause]").onclick = async (e) => {
+    const currentlyPaused = e.target.classList.contains("paused");
+    const ok = await postJSON("/api/pause", { symbol_key: key, value: !currentlyPaused });
+    if (ok) fetchStatus();
+  };
+
+  card.querySelectorAll("[data-level]").forEach(input => {
     input.onchange = async () => {
       const [symbolKey, which] = input.getAttribute("data-level").split(":");
       const raw = input.value.trim();
@@ -297,6 +302,48 @@ function renderSymbols(symbols) {
       if (ok) fetchStatus();
     };
   });
+
+  return card;
+}
+
+function updateSymbolCard(key, s) {
+  const card = document.getElementById(`card-${key}`);
+  card.querySelector('[data-f="close"]').textContent = fmtNum(s.close);
+
+  const regimeBadge = card.querySelector('[data-f="regime"]');
+  regimeBadge.textContent = s.regime;
+  regimeBadge.className = "badge " + regimeBadgeClass(s.regime);
+  card.querySelector('[data-f="cooldown"]').style.display = s.cooldown ? "inline-block" : "none";
+
+  card.querySelector('[data-f="er"]').textContent = fmtNum(s.er, 3);
+  card.querySelector('[data-f="macd"]').textContent =
+    s.macd_hist == null ? "—" : (s.macd_hist >= 0 ? "+" : "") + fmtNum(s.macd_hist);
+
+  const posEl = card.querySelector('[data-f="position"]');
+  if (!s.position) {
+    posEl.textContent = "flat";
+    posEl.className = "position";
+  } else {
+    posEl.textContent = `${s.position.direction.toUpperCase()} ${s.position.volume} lots   P&L ${fmtMoney(s.position.profit)}`;
+    posEl.className = "position " + s.position.direction;
+  }
+
+  card.querySelectorAll("[data-bias-row] button").forEach(btn => {
+    const val = btn.getAttribute("data-val") || null;
+    const isActive = val === (s.bias || null);
+    btn.classList.toggle("active", isActive);
+  });
+
+  const pauseBtn = card.querySelector("[data-pause]");
+  pauseBtn.textContent = s.paused_now ? "RESUME" : "PAUSE NOW";
+  pauseBtn.classList.toggle("paused", !!s.paused_now);
+
+  const upInput = card.querySelector(`[data-level="${key}:invalidation_up"]`);
+  const dnInput = card.querySelector(`[data-level="${key}:invalidation_down"]`);
+  const up = s.key_levels && s.key_levels.invalidation_up != null ? s.key_levels.invalidation_up : "";
+  const dn = s.key_levels && s.key_levels.invalidation_down != null ? s.key_levels.invalidation_down : "";
+  if (document.activeElement !== upInput) upInput.value = up;
+  if (document.activeElement !== dnInput) dnInput.value = dn;
 }
 
 function renderJournal(entries) {
