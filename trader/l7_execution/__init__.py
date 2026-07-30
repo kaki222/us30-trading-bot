@@ -85,6 +85,18 @@ def connect(login: int | None = None, password: str | None = None,
     want this script to log in itself (avoid hardcoding real credentials
     in source; read them from an environment variable or a local
     untracked file instead).
+
+    Also explicitly mt5.symbol_select()'s every symbol in SYMBOL_MAP
+    (2026-07-30, real bug fix — not cosmetic). copy_rates_from_pos()
+    doesn't require a symbol to be actively selected/visible in Market
+    Watch to return SOMETHING, but if it isn't, MT5 can hand back
+    whatever it last had cached for that symbol instead of a genuinely
+    live-updating feed — no error, no warning, just a stale last bar
+    that silently stops moving. That's exactly what a user report looked
+    like: live_monitor.py's title showed US30 close=51788.80 while the
+    real live price was 52145, a real ~350pt gap, not just "hasn't
+    redrawn yet." Selecting the symbol here, once, right after
+    initialize(), is what actually turns on live tick streaming for it.
     """
     if mt5 is None:
         raise RuntimeError(
@@ -100,6 +112,15 @@ def connect(login: int | None = None, password: str | None = None,
     ok = mt5.initialize(**kwargs)
     if not ok:
         raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
+
+    for symbol in SYMBOL_MAP.values():
+        if not mt5.symbol_select(symbol, True):
+            # Not fatal (the symbol name itself might just be wrong for
+            # this account — resolve_symbol() is the tool for that) but
+            # worth a loud print rather than silently risking the same
+            # stale-price bug this fix exists for.
+            print(f"WARNING: mt5.symbol_select({symbol!r}, True) failed: {mt5.last_error()} "
+                  f"— live prices for this symbol may be stale.")
     return True
 
 

@@ -199,6 +199,11 @@ def _render_chart_png(symbol_key: str, bars: int, visible_bars: int) -> bytes:
     lm._redraw_column(
         symbol_key, symbol, price_ax, er_ax, macd_ax, bars, TIMEFRAME, visible_bars,
         {}, bias, show_ylabels=True, n_columns=1, panel_width_in=0.0,
+        # compact=True: the phone card already shows symbol/price/ER/regime/
+        # bias/breaker in its own header right above this image, so skip
+        # live_monitor.py's redundant on-chart title text here (desktop's
+        # own window, with no such card header, still gets it).
+        compact=True,
     )
     fig.tight_layout()
     buf = io.BytesIO()

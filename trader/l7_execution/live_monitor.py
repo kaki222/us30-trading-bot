@@ -99,6 +99,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 from matplotlib.widgets import RadioButtons, Button, TextBox
+from matplotlib import transforms
 import mplfinance as mpf
 
 from . import (
@@ -225,7 +226,8 @@ def _log_line(symbol_key: str, info: dict) -> str:
 
 def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
                     bars: int, timeframe: str, visible_bars: int, view_state: dict, bias: str | None,
-                    show_ylabels: bool = True, n_columns: int = 1, panel_width_in: float = 0.0) -> dict:
+                    show_ylabels: bool = True, n_columns: int = 1, panel_width_in: float = 0.0,
+                    compact: bool = False) -> dict:
     # count=max(bars, 800) (2026-07-26): build_live_features() has its own
     # hardcoded default fetch of 800 bars, independent of `bars` (this
     # file's --bars flag) - which used to mean --bars could only ever
@@ -302,8 +304,25 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
         show_nontrading=False, addplot=addplots, ylabel=("Price" if show_ylabels else ""),
     )
 
-    price_ax.legend(handles=_LEGEND_HANDLES, loc="upper left", fontsize=7,
-                     framealpha=0.35, facecolor=BG, edgecolor=PANEL_EDGE, labelcolor=TEXT_MUTED)
+    # Shrunk + thinned down (2026-07-30, "amateurish vs professional" ask -
+    # user's own MT5 mobile app screenshot shows either no legend at all or a
+    # minimal one-line key, not a boxed multi-entry legend sitting on top of
+    # the candles). Fewer handles (just the two EMAs + swing markers, not
+    # every MA), smaller font, no border - reads as a light label, not a UI
+    # panel.
+    price_ax.legend(handles=_LEGEND_HANDLES, loc="upper left", fontsize=6,
+                     framealpha=0.25, facecolor=BG, edgecolor="none", labelcolor=TEXT_MUTED,
+                     handlelength=1.2, borderpad=0.3, labelspacing=0.25)
+
+    # Professional trading platforms (this file's own MT5 mobile reference)
+    # put the price/indicator scale on the RIGHT, not the left - tick_right()
+    # moves both the tick numbers and the axis label there. Done
+    # unconditionally (not just when show_ylabels) since it's a positioning
+    # change, not a label-suppression one - every column keeps its own
+    # independent numeric scale regardless of show_ylabels.
+    for ax in (price_ax, er_ax, macd_ax):
+        ax.yaxis.tick_right()
+        ax.yaxis.set_label_position("right")
 
     if show_ylabels:
         for ax in (price_ax, er_ax, macd_ax):
@@ -359,6 +378,31 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
             m_pad = (m_hi - m_lo) * 0.15 or 1.0
             macd_ax.set_ylim(m_lo - m_pad, m_hi + m_pad)
 
+    # Live last-price "ticker tag" (2026-07-30, "amateurish vs professional"
+    # ask) - the user's MT5 mobile app screenshot shows a boxed price label
+    # pinned to the right edge of the chart at the live price, plus a dashed
+    # reference line running across the panel. Recreated the same way here:
+    # a dashed horizontal line at the last Close, and an annotation whose x
+    # is a fixed axes-fraction (1.0 = right edge, so it stays pinned there
+    # regardless of zoom/pan) but whose y is the actual data-coordinate
+    # price - that combination needs a blended transform, since transAxes
+    # alone can't mix a fixed x with a data-scaled y. annotation_clip=False
+    # so the box isn't cut off right at the axes boundary where it's meant
+    # to sit.
+    last_close = chart_df["Close"].iloc[-1]
+    if pd.notna(last_close):
+        price_ax.axhline(last_close, color=TEXT_MUTED, linewidth=0.6, linestyle="--", alpha=0.6)
+        tag_color = UP if (len(chart_df) > 1 and last_close >= chart_df["Close"].iloc[-2]) else DOWN
+        blended = transforms.blended_transform_factory(price_ax.transAxes, price_ax.transData)
+        price_ax.annotate(
+            f" {last_close:.2f} ",
+            xy=(1.0, last_close), xycoords=blended,
+            xytext=(4, 0), textcoords="offset points",
+            ha="left", va="center", fontsize=7, fontfamily=MONO, color=BG,
+            fontweight="bold", annotation_clip=False,
+            bbox=dict(boxstyle="square,pad=0.25", facecolor=tag_color, edgecolor="none"),
+        )
+
     # mplfinance only date-formats the ax it draws candles into (price_ax) -
     # er_ax/macd_ax get plain 0..N integer ticks by default even though their
     # data lines up with price_ax bar-for-bar. Force a draw so price_ax's tick
@@ -374,72 +418,79 @@ def _redraw_column(symbol_key: str, symbol: str, price_ax, er_ax, macd_ax,
     macd_ax.set_xticks(date_ticks)
     macd_ax.set_xticklabels(date_labels, rotation=45, ha="right", fontsize=8, color=TEXT_MUTED)
 
-    # CHOP-state title used to be TEXT_MUTED (a pale slate-blue) - flagged
-    # 2026-07-26 as reading like a washed-out "white" against this dark
-    # theme, hard to read at a glance. Swapped for ER_THRESH (the same
-    # amber/gold already used for the ER threshold line/"SETPOINT" role
-    # elsewhere in this palette) rather than inventing a new color -
-    # TRENDING (green) and COOLDOWN (red) keep their existing, already-clear
-    # meaning.
-    title_color = DOWN if info["cooldown"] else (UP if info["regime"] == "TRENDING" else ER_THRESH)
-    breaker_txt = "COOLDOWN" if info["cooldown"] else "clear"
-    line1 = f"{symbol_key} ({timeframe})  close={info['close']:.2f}  ER={info['er']:.2f} [{info['regime']}]"
-    line2 = f"bias={info['bias']}  breaker={breaker_txt}"
-    one_line = f"{line1}  {line2}"
+    # compact=True (2026-07-30, "amateurish vs professional" ask): mobile's
+    # PWA card already shows symbol/price/ER/regime/bias/breaker in its own
+    # header directly above this chart image, so repeating all of it again
+    # as an on-chart title is exactly the kind of redundant clutter that
+    # made it look amateurish next to a real trading-platform screenshot.
+    # Desktop has no such card header, so it keeps the full title unchanged.
+    if not compact:
+        # CHOP-state title used to be TEXT_MUTED (a pale slate-blue) - flagged
+        # 2026-07-26 as reading like a washed-out "white" against this dark
+        # theme, hard to read at a glance. Swapped for ER_THRESH (the same
+        # amber/gold already used for the ER threshold line/"SETPOINT" role
+        # elsewhere in this palette) rather than inventing a new color -
+        # TRENDING (green) and COOLDOWN (red) keep their existing, already-clear
+        # meaning.
+        title_color = DOWN if info["cooldown"] else (UP if info["regime"] == "TRENDING" else ER_THRESH)
+        breaker_txt = "COOLDOWN" if info["cooldown"] else "clear"
+        line1 = f"{symbol_key} ({timeframe})  close={info['close']:.2f}  ER={info['er']:.2f} [{info['regime']}]"
+        line2 = f"bias={info['bias']}  breaker={breaker_txt}"
+        one_line = f"{line1}  {line2}"
 
-    # Column titles used to be one fixed-size line regardless of how wide
-    # the actual window was - fine at this file's original full-size
-    # design width, but resizing/docking the window to something
-    # narrower left the same point-sized text taking up a growing share
-    # of a shrinking column, until neighboring columns' titles started
-    # overlapping - what showed up when docked to half a screen
-    # (2026-07-26). A fixed inch-width heuristic (tried right after that,
-    # same day) turned out to still not GUARANTEE a fit - "the titles
-    # should fit... even spanning two lines" (2026-07-26, user's follow-up)
-    # needs an actual measurement, not a guessed threshold. price_ax's
-    # renderer is already available here (canvas.draw() ran a few lines up
-    # for the date-tick trick), so probe the real rendered width of
-    # candidate title strings against the axes' actual current pixel
-    # width and pick the largest fontsize (single line first, then two
-    # lines) that actually fits - falls back to the old inch-heuristic if
-    # measuring fails for any reason (e.g. a backend without a working
-    # get_renderer() at this point) rather than raising.
-    title_text, fontsize = one_line, 11
-    try:
-        renderer = price_ax.figure.canvas.get_renderer()
-        available_px = price_ax.get_window_extent(renderer=renderer).width
+        # Column titles used to be one fixed-size line regardless of how wide
+        # the actual window was - fine at this file's original full-size
+        # design width, but resizing/docking the window to something
+        # narrower left the same point-sized text taking up a growing share
+        # of a shrinking column, until neighboring columns' titles started
+        # overlapping - what showed up when docked to half a screen
+        # (2026-07-26). A fixed inch-width heuristic (tried right after that,
+        # same day) turned out to still not GUARANTEE a fit - "the titles
+        # should fit... even spanning two lines" (2026-07-26, user's follow-up)
+        # needs an actual measurement, not a guessed threshold. price_ax's
+        # renderer is already available here (canvas.draw() ran a few lines up
+        # for the date-tick trick), so probe the real rendered width of
+        # candidate title strings against the axes' actual current pixel
+        # width and pick the largest fontsize (single line first, then two
+        # lines) that actually fits - falls back to the old inch-heuristic if
+        # measuring fails for any reason (e.g. a backend without a working
+        # get_renderer() at this point) rather than raising.
+        title_text, fontsize = one_line, 11
+        try:
+            renderer = price_ax.figure.canvas.get_renderer()
+            available_px = price_ax.get_window_extent(renderer=renderer).width
 
-        def _width_px(text, fs):
-            probe = price_ax.text(0, 0, text, fontsize=fs, fontweight="normal")
-            w = probe.get_window_extent(renderer=renderer).width
-            probe.remove()
-            return w
+            def _width_px(text, fs):
+                probe = price_ax.text(0, 0, text, fontsize=fs, fontweight="normal")
+                w = probe.get_window_extent(renderer=renderer).width
+                probe.remove()
+                return w
 
-        # Sizes brought down a notch (2026-07-26, user's call: "huge... make
-        # lower size and no-bold") - was 11/9/8/7, now 9/8/7/6. Same
-        # measured-fit logic as before, just a smaller ceiling.
-        if _width_px(one_line, 9) <= available_px:
-            title_text, fontsize = one_line, 9
-        elif _width_px(one_line, 7) <= available_px:
-            title_text, fontsize = one_line, 7
-        else:
-            for fs in (7, 6):
-                if max(_width_px(line1, fs), _width_px(line2, fs)) <= available_px:
-                    title_text, fontsize = f"{line1}\n{line2}", fs
-                    break
+            # Sizes brought down a notch (2026-07-26, user's call: "huge... make
+            # lower size and no-bold") - was 11/9/8/7, now 9/8/7/6. Same
+            # measured-fit logic as before, just a smaller ceiling.
+            if _width_px(one_line, 9) <= available_px:
+                title_text, fontsize = one_line, 9
+            elif _width_px(one_line, 7) <= available_px:
+                title_text, fontsize = one_line, 7
             else:
-                title_text, fontsize = f"{line1}\n{line2}", 6  # floor - may still be snug, never overlaps a neighbor
-    except Exception:
-        fig_width_in = price_ax.figure.get_size_inches()[0]
-        col_width_in = max(0.1, fig_width_in - panel_width_in) / max(1, n_columns)
-        if col_width_in >= 5.5:
-            title_text, fontsize = one_line, 9
-        elif col_width_in >= 3.0:
-            title_text, fontsize = one_line, 7
-        else:
-            title_text, fontsize = f"{line1}\n{line2}", 6
+                for fs in (7, 6):
+                    if max(_width_px(line1, fs), _width_px(line2, fs)) <= available_px:
+                        title_text, fontsize = f"{line1}\n{line2}", fs
+                        break
+                else:
+                    title_text, fontsize = f"{line1}\n{line2}", 6  # floor - may still be snug, never overlaps a neighbor
+        except Exception:
+            fig_width_in = price_ax.figure.get_size_inches()[0]
+            col_width_in = max(0.1, fig_width_in - panel_width_in) / max(1, n_columns)
+            if col_width_in >= 5.5:
+                title_text, fontsize = one_line, 9
+            elif col_width_in >= 3.0:
+                title_text, fontsize = one_line, 7
+            else:
+                title_text, fontsize = f"{line1}\n{line2}", 6
 
-    price_ax.set_title(title_text, fontsize=fontsize, fontweight="normal", loc="left", color=title_color)
+        price_ax.set_title(title_text, fontsize=fontsize, fontweight="normal", loc="left", color=title_color)
     return info
 
 
