@@ -65,6 +65,19 @@ immediate on/off you flip yourself, not a pre-set date range. Either
 way it's journaled (reason "manual_pause_window" or "paused_now") so
 it shows up in the weekly review like everything else.
 
+Manual mode / manual orders (2026-07-30, demo account only): manual_mode
+(manual_overrides.py) is a per-symbol Auto/Manual switch settable from
+the mobile app. When True for a symbol, this loop skips it exactly like
+paused_now - no run_once() call, no order from the mechanical engine at
+all - because you've flagged that symbol as "I'm placing orders by hand
+in the app right now." The actual manual order placement lives entirely
+in mobile_api.py (POST /api/manual_order/validate then /send), reusing
+place_trade()/run_once()'s existing sizing and execution code with its
+own magic number so manual fills never confuse this script's circuit
+breaker or position tracking for the mechanical MAGIC. This checked
+first, before paused_now, since manual_mode is a longer-lived "hands off,
+I've got this symbol" state rather than a short pause.
+
 Bias/key-levels/paused-now went from hardcoded dicts in this file to
 manual_overrides.py's data/manual_overrides.json (2026-07-25) so
 live_monitor.py's dashboard widgets can actually change them with a
@@ -180,6 +193,12 @@ def main():
 
     for symbol_key in ["US30", "GOLD"]:
         context = _key_level_context(symbol_key, overrides["key_levels"].get(symbol_key))
+
+        if overrides.get("manual_mode", {}).get(symbol_key, False):
+            result = {"action": "skip", "reason": "manual_mode"}
+            append_entry(symbol_key, TIMEFRAME, MAGIC, result, context=context)
+            print(f"  {symbol_key}: skip (manual_mode - engine off, you're trading this one by hand in the app)")
+            continue
 
         paused_now = overrides["paused_now"].get(symbol_key, False)
         if _in_pause_window(symbol_key, now) or paused_now:

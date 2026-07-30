@@ -29,13 +29,40 @@ the "home WiFi only" scope this was built for. GET endpoints (status/
 journal) are unauthenticated — read-only numbers off a $500k demo account,
 the same sensitivity as what's already visible in live_monitor.py's window.
 
-What this can NEVER do, by construction (same boundary as
-live_monitor.py's buttons): no order placement, no close_position(), no
-run_once() call. The only functions this calls that mutate anything are
-manual_overrides.set_bias() / set_paused_now() / set_key_level() — which
-can only ever mute, downsize, or skip a trade the mechanical strategy
-would otherwise take, never invent or place one. See run_scheduled.py's
-module docstring for exactly how those get applied.
+Discretionary controls (bias/pause/key-level) can NEVER place an order,
+by construction: the only functions they call are manual_overrides.
+set_bias()/set_paused_now()/set_key_level(), which can only ever mute,
+downsize, or skip a trade the mechanical strategy would otherwise take,
+never invent or place one. See run_scheduled.py's module docstring for
+exactly how those get applied.
+
+Manual orders (2026-07-30 — the one thing in this whole repo that CAN
+place a real order): /api/manual_mode toggles a symbol between Auto (the
+mechanical engine runs it, same as always) and Manual (run_scheduled.py
+skips it entirely — see its module docstring — and these two endpoints
+become usable for it):
+  POST /api/manual_order/validate — always dry_run=True, a pure preview
+    (lot size, SL/TP, what request WOULD be sent), reuses place_trade()
+    from this package rather than reimplementing order math.
+  POST /api/manual_order/send — the only call anywhere in this repo that
+    can reach place_trade(dry_run=False). Requires ALL of: token auth,
+    manual_mode=True already set for that symbol, body confirm=true, no
+    existing open position under MANUAL_MAGIC on that symbol, AND — the
+    hard safeguard for the demo-only scope the user set 2026-07-30 — the
+    connected account's login must equal DEMO_LOGIN below; anything else
+    (including the user's own real-money account, 330507861) is refused
+    with a 403 before place_trade() is ever called, no override. Uses
+    MANUAL_MAGIC (100002), a distinct magic from the mechanical engine's
+    MAGIC (100001), so a manual fill can never be mistaken for a
+    mechanical one by has_open_position()/LiveCircuitBreaker/journal
+    filtering, and vice versa — the two can coexist on different symbols
+    (or even the same symbol, though manual_mode blocks the mechanical
+    engine from also trading it) without confusing each other's state.
+    Every send is journaled via journal.append_entry() same as a
+    mechanical trade, so journal_summary.py shows manual fills too.
+This is still a demo-account tool: nothing here reaches for the real
+account on its own, and the DEMO_LOGIN check is a hard stop, not a
+warning, if that ever changes.
 
 Run alongside (not instead of) run_scheduled.py's Task Scheduler job and
 live_monitor.py — independent processes, all three read/write the same
@@ -79,15 +106,27 @@ matplotlib.use("Agg")
 from . import (
     connect, shutdown, SYMBOL_MAP, TIMEFRAME_SECONDS,
     build_live_features, LiveCircuitBreaker, account_summary, get_position_info,
+    place_trade, has_open_position,
 )
 from . import live_monitor as lm
 from .run_scheduled import TIMEFRAME, PARAMS, MAGIC
-from .manual_overrides import load_overrides, set_bias, set_key_level, set_paused_now
-from .journal import read_entries
+from .manual_overrides import load_overrides, set_bias, set_key_level, set_paused_now, set_manual_mode
+from .journal import read_entries, append_entry
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 TOKEN_PATH = DATA_DIR / "mobile_token.txt"
 STATIC_DIR = Path(__file__).resolve().parent / "mobile_app"
+
+# Manual orders get their own magic, distinct from run_scheduled.py's
+# MAGIC (100001) — see module docstring's "Manual orders" section.
+MANUAL_MAGIC = 100002
+
+# Hard demo-only guard for /api/manual_order/send — see module docstring.
+# The user's real-money account (330507861, same broker/server family,
+# see l7_execution/__init__.py's SYMBOL_MAP comment) must NEVER be
+# reachable through this endpoint; this is a login-number equality
+# check, not a setting, so there's nothing to accidentally misconfigure.
+DEMO_LOGIN = 345899957
 
 app = Flask(__name__, static_folder=None)
 
@@ -189,7 +228,9 @@ def api_status():
             "bias": overrides["bias"].get(symbol_key),
             "paused_now": overrides["paused_now"].get(symbol_key, False),
             "key_levels": overrides["key_levels"].get(symbol_key, {}),
+            "manual_mode": overrides.get("manual_mode", {}).get(symbol_key, False),
             "position": get_position_info(symbol, MAGIC),
+            "manual_position": get_position_info(symbol, MANUAL_MAGIC),
         }
     return jsonify({"account": account_summary(), "symbols": symbols})
 
@@ -239,6 +280,133 @@ def api_set_key_level():
         return jsonify({"error": f"which must be invalidation_up/invalidation_down, got {which!r}"}), 400
     set_key_level(symbol_key, which, None if value in (None, "") else float(value))
     return jsonify({"ok": True})
+
+
+@app.route("/api/manual_mode", methods=["POST"])
+def api_set_manual_mode():
+    if not _check_token():
+        return jsonify({"error": "bad token"}), 401
+    body = request.get_json(force=True) or {}
+    symbol_key, value = body.get("symbol_key"), bool(body.get("value"))
+    if symbol_key not in SYMBOL_MAP:
+        return jsonify({"error": f"unknown symbol_key {symbol_key!r}"}), 400
+    set_manual_mode(symbol_key, value)
+    return jsonify({"ok": True})
+
+
+def _parse_manual_order_body(body: dict):
+    """Shared validation for validate/send below. Returns (params, None)
+    on success or (None, (json_response, status_code)) on failure — every
+    field is checked before either endpoint touches place_trade(), so a
+    typo'd field never silently falls back to some default on a real
+    order."""
+    symbol_key = body.get("symbol_key")
+    direction = body.get("direction")
+    sl, tp = body.get("sl"), body.get("tp")
+    risk_pct = body.get("risk_pct", 0.01)
+
+    if symbol_key not in SYMBOL_MAP:
+        return None, (jsonify({"error": f"unknown symbol_key {symbol_key!r}"}), 400)
+    if direction not in ("long", "short"):
+        return None, (jsonify({"error": f"direction must be long/short, got {direction!r}"}), 400)
+    try:
+        sl, tp, risk_pct = float(sl), float(tp), float(risk_pct)
+    except (TypeError, ValueError):
+        return None, (jsonify({"error": "sl/tp/risk_pct must be numbers"}), 400)
+    if sl <= 0 or tp <= 0:
+        return None, (jsonify({"error": "sl/tp must be positive prices"}), 400)
+    if not (0 < risk_pct <= 0.05):
+        return None, (jsonify({"error": f"risk_pct must be in (0, 0.05], got {risk_pct}"}), 400)
+
+    return {"symbol_key": symbol_key, "direction": direction, "sl": sl, "tp": tp, "risk_pct": risk_pct}, None
+
+
+def _preview_manual_order(params: dict):
+    """Runs place_trade(dry_run=True) (which fetches the live tick itself
+    — this file doesn't import MetaTrader5 directly, l7_execution/
+    __init__.py already owns that try/import), then sanity-checks sl/tp
+    landed on the correct side of the actual live price for the given
+    direction. Returns (preview_dict, None) or (None, (json, status))."""
+    symbol = SYMBOL_MAP[params["symbol_key"]]
+    preview = place_trade(
+        symbol, params["direction"], params["sl"], params["tp"],
+        risk_pct=params["risk_pct"], leverage=30, magic=MANUAL_MAGIC, dry_run=True,
+    )
+    price = preview["would_send"]["price"]
+    direction, sl, tp = params["direction"], params["sl"], params["tp"]
+    if direction == "long" and not (sl < price < tp):
+        return None, (jsonify({"error": f"long needs sl < price < tp — got sl={sl}, price={price}, tp={tp}"}), 400)
+    if direction == "short" and not (tp < price < sl):
+        return None, (jsonify({"error": f"short needs tp < price < sl — got tp={tp}, price={price}, sl={sl}"}), 400)
+    return preview, None
+
+
+@app.route("/api/manual_order/validate", methods=["POST"])
+def api_manual_order_validate():
+    """Always a dry run — pure preview, never touches manual_mode or the
+    token gate, so the app can show a live preview as the user types
+    without needing the token in the loop yet."""
+    body = request.get_json(force=True) or {}
+    params, err = _parse_manual_order_body(body)
+    if err:
+        return err
+    preview, err = _preview_manual_order(params)
+    if err:
+        return err
+    return jsonify({"ok": True, "preview": preview})
+
+
+@app.route("/api/manual_order/send", methods=["POST"])
+def api_manual_order_send():
+    """The only path in this whole app that can place a real order — see
+    module docstring for the full list of gates. Every one of them is
+    checked here, in order, before place_trade(dry_run=False) is called;
+    any failure returns before that point, order never sent."""
+    if not _check_token():
+        return jsonify({"error": "bad token"}), 401
+
+    body = request.get_json(force=True) or {}
+    if not body.get("confirm"):
+        return jsonify({"error": "confirm must be true to send a real order"}), 400
+
+    params, err = _parse_manual_order_body(body)
+    if err:
+        return err
+    symbol_key, symbol = params["symbol_key"], SYMBOL_MAP[params["symbol_key"]]
+
+    if not load_overrides().get("manual_mode", {}).get(symbol_key, False):
+        return jsonify({"error": f"{symbol_key} is not in Manual mode — flip its Auto/Manual "
+                                  f"switch first"}), 403
+
+    acct = account_summary()
+    if acct["login"] != DEMO_LOGIN:
+        # Hard stop — see module docstring's "Manual orders" section and
+        # DEMO_LOGIN's comment above. This is not meant to ever trigger
+        # given how this app is set up to only ever run against the demo
+        # terminal, but it stays a real check, not just a comment.
+        return jsonify({"error": f"refusing to send: connected account {acct['login']} is not "
+                                  f"the demo account ({DEMO_LOGIN}) this feature is scoped to"}), 403
+
+    if has_open_position(symbol, MANUAL_MAGIC):
+        return jsonify({"error": f"{symbol_key} already has an open manual position — close it "
+                                  f"first"}), 409
+
+    # Re-run the same sl/tp-vs-live-price sanity check /validate does —
+    # the price may have moved since the user last hit Validate, and this
+    # is the one call in the app allowed to actually place an order, so
+    # it re-checks rather than trusting a preview from a moment ago.
+    _, err = _preview_manual_order(params)
+    if err:
+        return err
+
+    trade = place_trade(
+        symbol, params["direction"], params["sl"], params["tp"],
+        risk_pct=params["risk_pct"], leverage=30, magic=MANUAL_MAGIC,
+        comment="l7_manual", dry_run=False,
+    )
+    result = {"action": "manual_trade", "direction": params["direction"], "trade": trade}
+    append_entry(symbol_key, TIMEFRAME, MANUAL_MAGIC, result)
+    return jsonify({"ok": True, "trade": trade})
 
 
 @app.route("/")

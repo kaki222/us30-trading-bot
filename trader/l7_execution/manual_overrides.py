@@ -17,11 +17,25 @@ Aug 7-10 whipsaw window) — those stay hardcoded there; `paused_now`
 below is the separate, immediate, click-to-toggle pause layered on top
 of them.
 
-Every change goes through set_bias()/set_key_level()/set_paused_now(),
-which write the new state AND append one line to
+Every change goes through set_bias()/set_key_level()/set_paused_now()/
+set_manual_mode(), which write the new state AND append one line to
 data/manual_overrides_log.jsonl (timestamp, field, symbol, old, new) —
 same idea as journal.py, so there's a record of exactly when and why a
-bias/pause/level changed, not just its current value.
+bias/pause/level/mode changed, not just its current value.
+
+manual_mode (2026-07-30): per-symbol Auto/Manual switch. False (Auto,
+the default) is everything this file already did before this field
+existed - the mechanical strategy runs on schedule, bias/pause/key-levels
+can only ever mute/downsize/skip it. True (Manual) does two things at
+once: run_scheduled.py skips that symbol entirely (same effect as
+paused_now, see its check there), AND mobile_api.py's manual-order
+endpoints (/api/manual_order/validate, /send) refuse to act on that
+symbol unless it's True - so the mechanical engine and a manual order can
+never both be live on the same symbol at the same time. This is the one
+field in this file that gates something beyond mute/downsize/skip - see
+mobile_api.py's module docstring for the actual order-placement path and
+its own safeguards (still demo-account-only, still requires an explicit
+confirm on top of this flag).
 
 Not thread-safe against two writers at the exact same instant — fine
 here since only one human is expected to be clicking one dashboard at
@@ -47,6 +61,7 @@ DEFAULT_KEY_LEVELS = {
     "GOLD": {"invalidation_up": 4180.0, "invalidation_down": 3958.0},
 }
 DEFAULT_PAUSED_NOW = {"US30": False, "GOLD": False}
+DEFAULT_MANUAL_MODE = {"US30": False, "GOLD": False}
 
 
 def _defaults() -> dict:
@@ -54,6 +69,7 @@ def _defaults() -> dict:
         "bias": dict(DEFAULT_BIAS),
         "key_levels": {k: dict(v) for k, v in DEFAULT_KEY_LEVELS.items()},
         "paused_now": dict(DEFAULT_PAUSED_NOW),
+        "manual_mode": dict(DEFAULT_MANUAL_MODE),
     }
 
 
@@ -128,6 +144,20 @@ def set_paused_now(symbol_key: str, value: bool) -> None:
     state["paused_now"][symbol_key] = value
     save_overrides(state)
     _log_change("paused_now", symbol_key, old, value)
+
+
+def set_manual_mode(symbol_key: str, value: bool) -> None:
+    """True = Manual (mechanical engine skips this symbol entirely, manual
+    order endpoints in mobile_api.py become usable for it). False = Auto
+    (default) — everything runs exactly as it did before this field
+    existed."""
+    state = load_overrides()
+    old = state["manual_mode"].get(symbol_key, False)
+    if old == value:
+        return
+    state["manual_mode"][symbol_key] = value
+    save_overrides(state)
+    _log_change("manual_mode", symbol_key, old, value)
 
 
 def read_change_log() -> list[dict]:

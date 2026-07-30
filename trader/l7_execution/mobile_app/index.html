@@ -91,6 +91,30 @@
   }
   .pause-btn.paused { border-color: var(--down); color: var(--down); background: rgba(255,23,68,0.08); }
 
+  .btn.manual.active { border-color: var(--gold); color: var(--gold); background: rgba(255,171,0,0.08); }
+
+  .manual-order {
+    margin-top: 8px; padding: 10px; border: 1px solid var(--gold); border-radius: 4px;
+    background: rgba(255,171,0,0.04);
+  }
+  .manual-order .section-label { margin-top: 0; }
+  .order-preview {
+    font-size: 11px; color: var(--muted); margin-top: 8px; min-height: 14px; line-height: 1.5;
+  }
+  .order-preview .ok { color: var(--text); }
+  .order-preview .err { color: var(--down); }
+  .order-btn {
+    flex: 1; text-align: center; padding: 9px 4px; border-radius: 4px; border: 1px solid var(--edge);
+    background: transparent; color: var(--muted); font-size: 12px; font-family: inherit;
+    font-weight: 500; letter-spacing: 0.03em; cursor: pointer;
+  }
+  .validate-btn { border-color: var(--cyan); color: var(--cyan); }
+  .send-btn { border-color: var(--down); color: var(--down); }
+  .send-btn:disabled, .validate-btn:disabled {
+    opacity: 0.35; cursor: default; border-color: var(--edge); color: var(--muted); background: transparent;
+  }
+  .send-btn.ready { background: rgba(255,23,68,0.12); }
+
   .levels { display: flex; gap: 8px; margin-top: 8px; }
   .level-field { flex: 1; }
   .level-field label { display: block; font-size: 10px; color: var(--muted); margin-bottom: 3px; }
@@ -195,6 +219,16 @@ async function postJSON(path, body) {
   return res.ok;
 }
 
+async function postJSONRaw(path, body) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Auth-Token": TOKEN || "" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({ error: res.statusText }));
+  return { ok: res.ok, data };
+}
+
 function setConn(ok) {
   const el = $("#conn");
   el.textContent = ok ? "● LIVE" : "● DISCONNECTED";
@@ -278,6 +312,39 @@ function buildSymbolCard(key) {
         <input type="number" inputmode="decimal" data-level="${key}:invalidation_down">
       </div>
     </div>
+
+    <div class="section-label">// MODE</div>
+    <div class="btn-row" data-mode-row="${key}">
+      <button class="btn" data-mode="auto">AUTO</button>
+      <button class="btn manual" data-mode="manual">MANUAL</button>
+    </div>
+
+    <div class="manual-order" data-manual-order="${key}" style="display:none">
+      <div class="section-label">// MANUAL ORDER — DEMO ACCOUNT ONLY</div>
+      <div class="btn-row" data-dir-row="${key}">
+        <button class="btn long" data-dir="long">LONG</button>
+        <button class="btn short" data-dir="short">SHORT</button>
+      </div>
+      <div class="levels">
+        <div class="level-field">
+          <label>SL</label>
+          <input type="number" inputmode="decimal" data-order-field="${key}:sl">
+        </div>
+        <div class="level-field">
+          <label>TP</label>
+          <input type="number" inputmode="decimal" data-order-field="${key}:tp">
+        </div>
+        <div class="level-field">
+          <label>risk %</label>
+          <input type="number" inputmode="decimal" step="0.1" value="1" data-order-field="${key}:risk_pct">
+        </div>
+      </div>
+      <div class="order-preview" data-order-preview="${key}"></div>
+      <div class="btn-row" style="margin-top:8px">
+        <button class="order-btn validate-btn" data-validate="${key}">VALIDATE</button>
+        <button class="order-btn send-btn" data-send="${key}" disabled>SEND</button>
+      </div>
+    </div>
   `;
 
   card.querySelectorAll("[data-bias-row] button").forEach(btn => {
@@ -303,6 +370,40 @@ function buildSymbolCard(key) {
     };
   });
 
+  // ---- mode (Auto/Manual) --------------------------------------------
+  card.querySelectorAll("[data-mode-row] button").forEach(btn => {
+    btn.onclick = async () => {
+      const wantManual = btn.getAttribute("data-mode") === "manual";
+      const ok = await postJSON("/api/manual_mode", { symbol_key: key, value: wantManual });
+      if (ok) fetchStatus();
+    };
+  });
+
+  // ---- manual order form ----------------------------------------------
+  // _orderState[key].direction tracks the LONG/SHORT toggle (not sent to
+  // the server until Validate/Send). validatedBody is a JSON snapshot of
+  // exactly what was last successfully validated — Send only enables
+  // when the current form still matches it exactly, so changing anything
+  // after Validate (a field, the direction) always forces a re-validate
+  // before Send can fire, never lets a stale preview get sent.
+  _orderState[key] = { direction: "long", validatedBody: null };
+
+  card.querySelectorAll("[data-dir-row] button").forEach(btn => {
+    btn.onclick = () => {
+      _orderState[key].direction = btn.getAttribute("data-dir");
+      card.querySelectorAll("[data-dir-row] button").forEach(b =>
+        b.classList.toggle("active", b === btn));
+      invalidateOrderValidation(key);
+    };
+  });
+
+  card.querySelectorAll("[data-order-field]").forEach(input => {
+    input.addEventListener("input", () => invalidateOrderValidation(key));
+  });
+
+  card.querySelector("[data-validate]").onclick = () => validateManualOrder(key);
+  card.querySelector("[data-send]").onclick = () => sendManualOrder(key);
+
   return card;
 }
 
@@ -320,12 +421,15 @@ function updateSymbolCard(key, s) {
     s.macd_hist == null ? "—" : (s.macd_hist >= 0 ? "+" : "") + fmtNum(s.macd_hist);
 
   const posEl = card.querySelector('[data-f="position"]');
-  if (!s.position) {
+  const parts = [];
+  if (s.position) parts.push(`${s.position.direction.toUpperCase()} ${s.position.volume} lots   P&L ${fmtMoney(s.position.profit)}`);
+  if (s.manual_position) parts.push(`MANUAL ${s.manual_position.direction.toUpperCase()} ${s.manual_position.volume} lots   P&L ${fmtMoney(s.manual_position.profit)}`);
+  if (!parts.length) {
     posEl.textContent = "flat";
     posEl.className = "position";
   } else {
-    posEl.textContent = `${s.position.direction.toUpperCase()} ${s.position.volume} lots   P&L ${fmtMoney(s.position.profit)}`;
-    posEl.className = "position " + s.position.direction;
+    posEl.textContent = parts.join("  /  ");
+    posEl.className = "position " + ((s.position || s.manual_position).direction);
   }
 
   card.querySelectorAll("[data-bias-row] button").forEach(btn => {
@@ -344,6 +448,12 @@ function updateSymbolCard(key, s) {
   const dn = s.key_levels && s.key_levels.invalidation_down != null ? s.key_levels.invalidation_down : "";
   if (document.activeElement !== upInput) upInput.value = up;
   if (document.activeElement !== dnInput) dnInput.value = dn;
+
+  card.querySelectorAll("[data-mode-row] button").forEach(btn => {
+    const isManual = btn.getAttribute("data-mode") === "manual";
+    btn.classList.toggle("active", isManual === !!s.manual_mode);
+  });
+  card.querySelector(`[data-manual-order="${key}"]`).style.display = s.manual_mode ? "block" : "none";
 }
 
 function renderJournal(entries) {
@@ -358,6 +468,86 @@ function renderJournal(entries) {
       : (e.result && e.result.reason ? e.result.reason : "skip");
     return `<div class="entry"><span class="t">${t}</span> &nbsp; <b>${e.symbol_key}</b> &nbsp; <span class="${cls}">${detail}</span></div>`;
   }).join("");
+}
+
+// ---- manual order form ----------------------------------------------
+// Per-card state: which direction is selected, and a JSON snapshot of
+// the last body that server-side validate() actually accepted. Send
+// only ever fires with a body that exactly matches validatedBody — see
+// buildSymbolCard's field/direction listeners, which call
+// invalidateOrderValidation() on any change.
+const _orderState = {};
+
+function getOrderBody(key) {
+  const card = document.getElementById(`card-${key}`);
+  const sl = card.querySelector(`[data-order-field="${key}:sl"]`).value;
+  const tp = card.querySelector(`[data-order-field="${key}:tp"]`).value;
+  const riskPct = card.querySelector(`[data-order-field="${key}:risk_pct"]`).value;
+  return {
+    symbol_key: key,
+    direction: _orderState[key].direction,
+    sl: parseFloat(sl),
+    tp: parseFloat(tp),
+    risk_pct: (parseFloat(riskPct) || 0) / 100,
+  };
+}
+
+function invalidateOrderValidation(key) {
+  _orderState[key].validatedBody = null;
+  const card = document.getElementById(`card-${key}`);
+  card.querySelector("[data-send]").disabled = true;
+  card.querySelector("[data-send]").classList.remove("ready");
+}
+
+async function validateManualOrder(key) {
+  const card = document.getElementById(`card-${key}`);
+  const previewEl = card.querySelector(`[data-order-preview="${key}"]`);
+  const body = getOrderBody(key);
+  if (Number.isNaN(body.sl) || Number.isNaN(body.tp) || !body.risk_pct) {
+    previewEl.innerHTML = '<span class="err">enter SL, TP, and risk % first</span>';
+    return;
+  }
+  previewEl.innerHTML = '<span class="err">validating…</span>';
+  const { ok, data } = await postJSONRaw("/api/manual_order/validate", body);
+  if (!ok) {
+    previewEl.innerHTML = `<span class="err">${data.error || "validation failed"}</span>`;
+    invalidateOrderValidation(key);
+    return;
+  }
+  const p = data.preview;
+  previewEl.innerHTML = `<span class="ok">${body.direction.toUpperCase()} ${p.lots} lots @ ~${p.would_send.price} `
+    + `— risk ${(body.risk_pct * 100).toFixed(2)}% (size_fraction ${p.size_fraction.toFixed(4)})</span>`;
+  _orderState[key].validatedBody = JSON.stringify(body);
+  const sendBtn = card.querySelector("[data-send]");
+  sendBtn.disabled = false;
+  sendBtn.classList.add("ready");
+}
+
+async function sendManualOrder(key) {
+  const card = document.getElementById(`card-${key}`);
+  const previewEl = card.querySelector(`[data-order-preview="${key}"]`);
+  const body = getOrderBody(key);
+  if (JSON.stringify(body) !== _orderState[key].validatedBody) {
+    previewEl.innerHTML = '<span class="err">form changed since last Validate — validate again</span>';
+    invalidateOrderValidation(key);
+    return;
+  }
+  const sure = confirm(
+    `Send a REAL ${body.direction.toUpperCase()} order on ${key} (demo account)?\n\n`
+    + `SL ${body.sl}   TP ${body.tp}   risk ${(body.risk_pct * 100).toFixed(2)}%\n\n`
+    + `This places an actual order on the connected MT5 account.`
+  );
+  if (!sure) return;
+
+  previewEl.innerHTML = '<span class="err">sending…</span>';
+  const { ok, data } = await postJSONRaw("/api/manual_order/send", { ...body, confirm: true });
+  if (!ok) {
+    previewEl.innerHTML = `<span class="err">${data.error || "send failed"}</span>`;
+    return;
+  }
+  previewEl.innerHTML = '<span class="ok">order sent ✓</span>';
+  invalidateOrderValidation(key);
+  fetchStatus();
 }
 
 // ---- charts ----------------------------------------------------

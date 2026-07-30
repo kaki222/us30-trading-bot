@@ -45,6 +45,11 @@ mo.OVERRIDES_LOG_PATH = _tmp_data / "manual_overrides_log.jsonl"
 _journal_path = _tmp_data / "journal.jsonl"
 jr.JOURNAL_PATH = _journal_path
 api.read_entries = lambda: jr.read_entries(path=_journal_path)
+# Same reasoning for append_entry's path= default - api_manual_order_send()
+# calls append_entry(symbol_key, TIMEFRAME, MANUAL_MAGIC, result) with no
+# explicit path=, so without this patch a manual send in this test would
+# silently write to the real repo's data/journal.jsonl instead of the temp one.
+api.append_entry = lambda *a, **kw: jr.append_entry(*a, path=_journal_path, **kw)
 
 api.TOKEN = api._load_or_create_token()
 
@@ -86,12 +91,29 @@ class FakeBreaker:
     def in_cooldown(self): return False
 
 
+def fake_place_trade(symbol, direction, sl, tp, risk_pct, leverage, magic,
+                      comment="l4_regime_confluence", dry_run=True):
+    """Fixed price=4000 so tests can pick sl/tp that land on the correct
+    side deliberately (or deliberately wrong, to exercise the sanity
+    check) - real risk-size math isn't the point of this test, place_trade
+    itself already has its own coverage elsewhere."""
+    price = 4000.0
+    request = {"symbol": symbol, "type": direction, "price": price,
+               "sl": sl, "tp": tp, "volume": 0.5, "magic": magic}
+    if dry_run:
+        return {"dry_run": True, "would_send": request, "size_fraction": 0.02, "lots": 0.5}
+    return {"dry_run": False, "request": request, "result": {"retcode": 10009}}
+
+
 api.connect = lambda path=None: None
 api.shutdown = lambda: None
 api.build_live_features = fake_build_live_features
 api.account_summary = fake_account_summary
 api.get_position_info = fake_get_position_info
 api.LiveCircuitBreaker = FakeBreaker
+api.place_trade = fake_place_trade
+api.has_open_position = lambda symbol, magic: False
+api.DEMO_LOGIN = 1  # matches fake_account_summary()'s login, so the demo-account gate can be tested both ways
 
 # /api/chart/<key>.png goes through lm._redraw_column(), which calls
 # live_monitor.py's OWN build_live_features/LiveCircuitBreaker bindings
@@ -174,6 +196,73 @@ r = client.post(f"/api/bias?token={api.TOKEN}", json={"symbol_key": "NOPE", "val
 check("bad symbol_key -> 400", r.status_code == 400)
 r = client.post(f"/api/bias?token={api.TOKEN}", json={"symbol_key": "US30", "value": "sideways"})
 check("bad bias value -> 400", r.status_code == 400)
+
+# --- manual_mode toggle ---
+r = client.post("/api/manual_mode", json={"symbol_key": "US30", "value": True})
+check("POST /api/manual_mode no token -> 401", r.status_code == 401)
+
+r = client.post(f"/api/manual_mode?token={api.TOKEN}", json={"symbol_key": "US30", "value": True})
+check("POST /api/manual_mode correct token -> 200", r.status_code == 200)
+check("manual_mode actually set", mo.load_overrides()["manual_mode"]["US30"] is True)
+
+r = client.get("/api/status")
+check("status reflects manual_mode", r.get_json()["symbols"]["US30"]["manual_mode"] is True)
+check("status has manual_position key", "manual_position" in r.get_json()["symbols"]["US30"])
+
+# --- manual order: validate (no token/manual_mode required - pure preview) ---
+long_ok = {"symbol_key": "US30", "direction": "long", "sl": 3950, "tp": 4100, "risk_pct": 0.01}
+r = client.post("/api/manual_order/validate", json=long_ok)
+check("validate long (correct side of price) -> 200", r.status_code == 200)
+check("validate response has preview.lots", r.get_json()["preview"]["lots"] == 0.5)
+
+long_bad = {"symbol_key": "US30", "direction": "long", "sl": 4050, "tp": 4100, "risk_pct": 0.01}
+r = client.post("/api/manual_order/validate", json=long_bad)
+check("validate long with sl on wrong side of price -> 400", r.status_code == 400)
+
+short_ok = {"symbol_key": "US30", "direction": "short", "sl": 4050, "tp": 3900, "risk_pct": 0.01}
+r = client.post("/api/manual_order/validate", json=short_ok)
+check("validate short (correct side of price) -> 200", r.status_code == 200)
+
+r = client.post("/api/manual_order/validate", json={"symbol_key": "US30", "direction": "sideways", "sl": 1, "tp": 2})
+check("validate bad direction -> 400", r.status_code == 400)
+
+r = client.post("/api/manual_order/validate", json={"symbol_key": "US30", "direction": "long", "sl": 1, "tp": 2, "risk_pct": 1.0})
+check("validate risk_pct over cap (0.05) -> 400", r.status_code == 400)
+
+# --- manual order: send ---
+r = client.post("/api/manual_order/send", json={**long_ok, "confirm": True})
+check("send no token -> 401", r.status_code == 401)
+
+r = client.post(f"/api/manual_order/send?token={api.TOKEN}", json=long_ok)  # no confirm
+check("send without confirm=true -> 400", r.status_code == 400)
+
+mo.set_manual_mode("GOLD", False)  # GOLD stays Auto - confirms the gate is per-symbol
+gold_order = {"symbol_key": "GOLD", "direction": "long", "sl": 3950, "tp": 4100, "risk_pct": 0.01, "confirm": True}
+r = client.post(f"/api/manual_order/send?token={api.TOKEN}", json=gold_order)
+check("send while symbol still in Auto mode -> 403", r.status_code == 403)
+
+api.DEMO_LOGIN = 999999  # deliberately mismatch fake_account_summary()'s login=1
+r = client.post(f"/api/manual_order/send?token={api.TOKEN}", json={**long_ok, "confirm": True})
+check("send when connected account isn't the demo account -> 403", r.status_code == 403)
+api.DEMO_LOGIN = 1  # restore match
+
+api.has_open_position = lambda symbol, magic: magic == api.MANUAL_MAGIC
+r = client.post(f"/api/manual_order/send?token={api.TOKEN}", json={**long_ok, "confirm": True})
+check("send while a manual position is already open -> 409", r.status_code == 409)
+api.has_open_position = lambda symbol, magic: False  # restore
+
+r = client.post(f"/api/manual_order/send?token={api.TOKEN}", json={**long_ok, "confirm": True})
+check("send with every gate satisfied -> 200", r.status_code == 200)
+send_body = r.get_json()
+check("send response has trade.dry_run False", send_body.get("trade", {}).get("dry_run") is False)
+
+r = client.get("/api/journal?n=50")
+entries = r.get_json()
+manual_entries = [e for e in entries if e.get("result", {}).get("action") == "manual_trade"]
+check("manual send was journaled", len(manual_entries) == 1)
+check("journaled manual entry used MANUAL_MAGIC", manual_entries[0]["magic"] == api.MANUAL_MAGIC)
+
+mo.set_manual_mode("US30", False)  # leave state clean for anything appended after this block
 
 # --- static frontend actually served ---
 r = client.get("/")

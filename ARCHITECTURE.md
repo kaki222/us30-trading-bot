@@ -871,6 +871,80 @@ doesn't reach code running inside the other. All passing as of this
 writing. The frontend itself (`index.html`'s JS) has not been exercised in
 a real browser — only the backend it talks to.
 
+### Auto/Manual mode + manual order placement (2026-07-30)
+
+The one deliberate exception to "nothing here places or sizes a real
+order" above. User's ask: a per-symbol Auto/Manual switch, and when
+Manual, a way to configure and actually send a real order from the
+running app itself — "engine should reside on the live app not
+somewhere else or needing you to do anything once i have run it and
+monitoring the market." Confirmed scope before writing any of this:
+demo account only (345899957), for the next couple of months, while the
+user's real-money account continues to be traded by them personally,
+entirely outside this app.
+
+**`manual_mode`** (`manual_overrides.py`): a new per-symbol bool next to
+bias/key_levels/paused_now, same atomic-write + change-log pattern,
+`set_manual_mode(symbol_key, value)`. `False` (Auto, default) is every
+behavior this file already had. `True` (Manual) does two things:
+`run_scheduled.py`'s loop skips that symbol entirely (checked first,
+before `paused_now` — see its module docstring), and the two manual-order
+endpoints below refuse to act on that symbol unless it's set. This is
+the mechanism that keeps the mechanical engine and a hand-placed order
+from ever fighting over the same symbol at the same time.
+
+**`POST /api/manual_mode`** — token-gated toggle, thin wrapper around
+`set_manual_mode()`, same shape as `/api/pause`.
+
+**`POST /api/manual_order/validate`** — always `dry_run=True`, a pure
+preview (no token, no manual_mode check — lets the app show live sizing
+as the user types). Reuses `place_trade()` from `l7_execution/__init__.py`
+directly rather than re-deriving lot-size math a second time. Body:
+`symbol_key`, `direction` (long/short), `sl`, `tp`, `risk_pct` (capped at
+0.05 — a fat-finger guard, not a strategy choice). Also sanity-checks
+sl/tp landed on the correct side of the live tick price for the given
+direction (long needs sl < price < tp, short the reverse) — a wrong-side
+SL isn't a risk-pct problem, it's a "this order is backwards" problem,
+caught before place_trade() ever runs.
+
+**`POST /api/manual_order/send`** — the only call anywhere in this repo
+that can reach `place_trade(dry_run=False)`. Every gate below is checked,
+in order, before that call; any failure returns first, no order sent:
+token auth → `confirm: true` present in the body → `manual_mode=True`
+already set for that symbol → connected account's login equals
+`DEMO_LOGIN` (345899957) — a hard-coded equality check, not a setting,
+so the user's real account (330507861) is structurally unreachable
+through this endpoint regardless of what the request asks for → no
+existing open position under `MANUAL_MAGIC` on that symbol already → the
+same sl/tp-vs-live-price sanity check `/validate` does, re-run rather
+than trusted from an earlier preview (price may have moved). Uses
+`MANUAL_MAGIC = 100002`, distinct from the mechanical engine's
+`MAGIC = 100001`, so a manual fill is invisible to the mechanical
+engine's `has_open_position()`/`LiveCircuitBreaker`/position-tracking
+and vice versa — the journal entry is tagged with `MANUAL_MAGIC` and
+`result.action = "manual_trade"` so `journal_summary.py` can tell manual
+fills apart from mechanical ones.
+
+**Frontend** (`mobile_app/index.html`): each symbol card gets an
+AUTO/MANUAL toggle; MANUAL reveals a form (direction, SL, TP, risk %)
+with VALIDATE and SEND buttons. SEND stays disabled until VALIDATE
+succeeds, and any change afterward — a field edit, switching direction —
+immediately disables it again (`invalidateOrderValidation()`), so a
+send body always exactly matches what was last validated, never a stale
+one. SEND itself is gated behind a native `confirm()` dialog stating
+it's a real order on the demo account before the request ever goes out.
+
+**Verified**: extended `test_mobile_api.py` with a mocked `place_trade`/
+`has_open_position` — manual_mode toggle auth, validate accepting a
+correctly-sided order and rejecting a backwards one, risk_pct-over-cap
+rejection, send rejecting missing token/confirm/manual_mode-still-Auto/
+wrong-account-login/existing-open-position, then a full successful send
+with the journal entry checked for `MANUAL_MAGIC` and `manual_trade`.
+All passing. The frontend's order form has not been exercised in a real
+browser or against a real MT5 terminal — only `node --check`'d for
+syntax and reviewed by hand; the user should validate-then-send one
+small test order on the demo account themselves before relying on it.
+
 ### Testing this yourself (I cannot do this part)
 
 On the Windows machine with the MT5 terminal, logged into an XM demo
