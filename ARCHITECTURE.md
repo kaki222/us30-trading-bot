@@ -1149,3 +1149,114 @@ using `RegimeConfluenceStrategy`, unaffected and unchanged by any of
 this. `SMCZoneConfluenceStrategy`/`SMCZoneLiquiditySweepStrategy` exist
 as opt-in classes for a future proper walk-forward evaluation, not
 production defaults.
+
+---
+
+## Momentum structural break gate — mined from a podcast transcript, tested, inconclusive (2026-07-31)
+
+User uploaded a transcript (not code) of an interview with Michael Oliver,
+founder of Momentum Structural Analysis (MSA) - a discretionary macro
+trader's stated method, not a repo. His claim, paraphrased: charting
+price directly is distorted by the currency it's priced in, so instead
+oscillate price against a moving average, then treat that oscillator as
+its own chartable structure (its own swing highs/lows, its own
+trendline breaks) - and that structure often breaks *before* price's
+own structure does, i.e. momentum leads price. The interview's macro
+opinions (bond crisis, gold price targets, Fed policy) are his
+discretionary thesis, not part of the method, and were **not** ported -
+only the structural-break mechanic, translated into something testable.
+
+**New, reusable features** (`l2_features.py`):
+- `momentum_oscillator(close, ma)` - `(Close - MA) / MA`, scale-free
+  across instruments (US30 ~50,000 vs Gold ~4,000 would otherwise need
+  separately-tuned thresholds for no real reason).
+- `build_momentum_structure_features(df, ma_col="ma_89", structure_lookback=8)`
+  - re-runs this file's own causal `swing_high()`/`swing_low()` (the same
+  functions already used for PRICE breakout detection,
+  `ConfluenceStrategy`'s `bos_up = price > swing_hi`) against the
+  oscillator instead of against price, producing `mom_break_up`/
+  `mom_break_down` - the oscillator's own breakout-of-its-own-structure
+  signal, independent of price's.
+
+**`MomentumStructureConfluenceStrategy(RegimeConfluenceStrategy)`**
+(`l4_signal_model.py`) - one new gate via the same `_extra_gates_ok()`
+hook `SMCZoneConfluenceStrategy` uses (default `True`, provably
+behavior-preserving on the base classes). Only allows an entry if the
+momentum oscillator already broke its own structure, in the same
+direction as the trade, within the last `mom_lead_bars` bars - not
+necessarily on the same bar as price's own BOS (that would be redundant
+with `bos_up`/`bos_down`), but at-or-before it. That "at-or-before" is
+the literal, checkable version of "momentum leads price."
+
+**Testing, honestly scoped down from the SMC section's methodology**:
+a full per-fold `Backtest.optimize()` walk-forward pass (the rigor every
+other headline number in this document has) was attempted and is
+**not computationally feasible in this sandbox environment** - a single
+fold with `MOMENTUM_STRUCTURE_OPTIMIZE_KWARGS` (the regime grid × 3
+`mom_structure_lookback` × 3 `mom_lead_bars` values) didn't finish
+inside this environment's 45-second command ceiling, and there's no way
+to run a longer job in the background across separate tool calls here
+(confirmed unworkable earlier this session, independently, while
+debugging a LibreOffice recalculation issue). So instead of the SMC
+section's full grid search, this used the cheaper `optimize_kwargs=None`
+path (anchored walk-forward, fixed params per run, no per-fold tuning -
+the same category of test `LiquiditySweepStrategy` originally got before
+its own full optimization pass) at several explicit `(mom_lead_bars,
+mom_structure_lookback)` points instead of a real grid search:
+
+| | US30 compounded return | US30 trades | Gold compounded return | Gold trades |
+|---|---|---|---|---|
+| Baseline (`RegimeConfluenceStrategy`) | +13.72% | 323 | -0.50% | 421 |
+| lead=10, lookback=8 (class defaults) | +14.55% | 320 | -0.50% | 421 |
+| lead=5, lookback=8 | **+18.55%** | 315 | -3.30% | 416 |
+| lead=3, lookback=5 | +14.79% | 322 | -0.52% | 421 |
+| lead=1, lookback=5 | +14.78% | 322 | -0.27% | 417 |
+| lead=20, lookback=15 | +16.47% | 321 | +1.46% | 419 |
+
+(36 US30 folds / 48 Gold folds, both anchored 12-month-initial/3-month-test,
+$100k cash, fixed defaults otherwise - not per-fold optimized, so not
+directly comparable to this document's other headline (optimized)
+walk-forward numbers.)
+
+Two things stood out while digging into *why*, not just *whether*, it
+moved the numbers:
+- The gate is loose. Checked directly: `mom_break_up`/`mom_break_down`
+  fire on ~18-19% of all bars per instrument, and "some break in the
+  last 10 bars" is true 65-70% of the time unconditionally - so at the
+  class defaults it barely filters anything.
+- Every tested variant produced the *exact same set* of profitable vs.
+  losing folds (19/36 US30, 22/48 Gold) as the baseline - only the
+  in-fold trade count and magnitude shifted. That's consistent with a
+  structural explanation rather than a bug: bars that already pass
+  `RegimeConfluenceStrategy`'s five-way confluence (macro trend, EMA
+  cross, MACD, ER regime, price BOS) are, by construction, bars where a
+  trend has usually already been running a while - so a same-direction
+  momentum-oscillator break very often already happened in the
+  preceding several bars almost by definition. That's mild secondhand
+  support for Oliver's "momentum leads price" claim structurally, but it
+  also means this gate, layered on top of an already-strict five-way
+  filter, has little left to discriminate on.
+
+**Verdict: inconclusive, leaning mildly positive on US30, not on Gold.**
+Every tested point improved on the US30 baseline (+0.83 to +4.83 points);
+Gold was flat-to-worse at four of five points and only modestly better
+at the fifth, on a baseline that's already unprofitable un-optimized.
+Nothing here was found via a real search of the parameter space - only
+five hand-picked points - so no combination above should be treated as
+"the good setting," only as evidence the idea isn't obviously dead on
+US30 and isn't obviously alive on Gold. A real verdict needs the full
+per-fold optimization pass this environment couldn't run.
+
+**Decision**: commit the infrastructure -
+`momentum_oscillator()`/`build_momentum_structure_features()`/
+`MomentumStructureConfluenceStrategy`/`MOMENTUM_STRUCTURE_OPTIMIZE_KWARGS`
+- real, tested (fixed-defaults + `test_mobile_api.py`'s existing chart
+render path, which now also exercises this file's swing_high/swing_low
+reuse indirectly), and reusable. Leave it **off by default**:
+`run_scheduled.py` and `live_monitor.py` keep using
+`RegimeConfluenceStrategy`, unaffected and unchanged. Treat
+`MomentumStructureConfluenceStrategy` as opt-in, same status as
+`SMCZoneConfluenceStrategy` - available for a proper walk-forward
+optimization pass (e.g. run from the user's own machine, which won't
+have this sandbox's compute ceiling) before it's trusted with real
+money, not a production default today.

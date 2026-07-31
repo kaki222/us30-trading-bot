@@ -324,3 +324,57 @@ def build_kalman_features(
     d["kalman_slow_level"] = slow["level"]
     d["kalman_slow_slope"] = slow["slope"]
     return d
+
+
+# ---------------------------------------------------------------------
+# Momentum Structural Analysis (MSA)-style features (2026-07-31) — mined
+# from Michael Oliver's (founder, Momentum Structural Analysis) "USA is
+# Jr. Weimar Republic" interview transcript the user uploaded, not code -
+# a discretionary macro trader's stated METHOD, not a repo we're porting.
+# His claim, paraphrased: charting price directly is distorted by the
+# "expanding ruler" of the currency it's priced in, so instead oscillate
+# price against a moving average (Close - MA, roughly), then treat THAT
+# oscillator as its own chartable structure (its own swing highs/lows,
+# its own trendline breaks) - and that structure often breaks BEFORE
+# price's own structure does, i.e. momentum leads price. The macro
+# opinions in that interview (bond crisis, gold targets, etc.) are his
+# discretionary thesis, not part of the method, and are NOT ported here -
+# only the structural-break mechanic, translated into something testable.
+# ---------------------------------------------------------------------
+
+def momentum_oscillator(close: pd.Series, ma: pd.Series) -> pd.Series:
+    """
+    Close expressed relative to a moving average, MSA-style: (Close - MA)
+    / MA rather than a raw Close-minus-MA difference, so the oscillator's
+    scale doesn't depend on the instrument's price level (US30 ~50,000 vs
+    Gold ~4,000 would otherwise need separately-tuned thresholds
+    downstream for no real reason).
+    """
+    return (close - ma) / ma
+
+
+def build_momentum_structure_features(
+    df: pd.DataFrame, ma_col: str = "ma_89", structure_lookback: int = 8,
+) -> pd.DataFrame:
+    """
+    Oscillates Close against df[ma_col] (momentum_oscillator above), then
+    re-runs the SAME causal swing_high()/swing_low() structure logic this
+    file already uses for PRICE breakout detection
+    (l4_signal_model.ConfluenceStrategy's bos_up = price > swing_hi) -
+    but against the oscillator instead of price. mom_break_up/
+    mom_break_down are that oscillator's own breakout-of-its-own-structure
+    signal: independent of, and not derived from, price's own
+    swing_hi/swing_lo. `df` must already carry `ma_col` (e.g. build_bt_df()
+    output has ma_89/ma_200/ma_360 - ma_89 chosen as the default "mood"
+    average, same one live_monitor.py already plots for this purpose).
+    """
+    osc = momentum_oscillator(df["Close"], df[ma_col])
+    osc_swing_hi = swing_high(osc, structure_lookback)
+    osc_swing_lo = swing_low(osc, structure_lookback)
+    return pd.DataFrame({
+        "mom_osc": osc,
+        "mom_swing_hi": osc_swing_hi,
+        "mom_swing_lo": osc_swing_lo,
+        "mom_break_up": osc > osc_swing_hi,
+        "mom_break_down": osc < osc_swing_lo,
+    })

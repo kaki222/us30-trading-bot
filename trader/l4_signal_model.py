@@ -12,7 +12,10 @@ file is layers 3+4 combined.
 import numpy as np
 from backtesting import Strategy
 
-from .l2_features import swing_high, swing_low, premium_discount_zone, trading_session
+from .l2_features import (
+    swing_high, swing_low, premium_discount_zone, trading_session,
+    build_momentum_structure_features,
+)
 from .l3_regime import efficiency_ratio
 from .l5_position_sizing import risk_based_size
 from .l6_risk import CircuitBreakerMixin
@@ -193,3 +196,53 @@ class SMCZoneConfluenceStrategy(RegimeConfluenceStrategy):
         if self.session_gate_enabled and self.session.iloc[i] == "Off-session":
             return False
         return True
+
+
+class MomentumStructureConfluenceStrategy(RegimeConfluenceStrategy):
+    """
+    RegimeConfluenceStrategy + one additional entry gate, mined
+    (2026-07-31) from Michael Oliver's Momentum Structural Analysis (MSA)
+    method, described in an interview transcript the user uploaded (not
+    code - a discretionary trader's stated method, translated into
+    something testable here). Oliver's claim: chart price relative to a
+    moving average (an oscillator) instead of price itself, then treat
+    THAT oscillator as its own chartable structure - its own swing highs/
+    lows, its own breakouts - and that structure often breaks BEFORE
+    price's own structure does, i.e. momentum leads price.
+
+    Translated literally: `l2_features.build_momentum_structure_features()`
+    re-runs this file's own swing_high()/swing_low() structure logic
+    (already used for PRICE breakout detection - `bos_up = price >
+    swing_hi` in ConfluenceStrategy.next()) against Close/ma_89 instead of
+    against Close itself, producing mom_break_up/mom_break_down. This
+    gate then only allows an entry if that MOMENTUM break, in the same
+    direction as the trade, already happened within the last
+    `mom_lead_bars` bars - not just on the same bar as the price signal
+    (that would be redundant with price's own BOS), but at-or-before it,
+    which is the actual "leads price" claim made literal and checkable.
+
+    ANDed on top of ConfluenceStrategy's five original conditions via the
+    same `_extra_gates_ok()` hook SMCZoneConfluenceStrategy uses - default
+    behavior of the base classes is provably unaffected (see that class's
+    docstring for the reasoning, unchanged here).
+    """
+    mom_ma_col = "ma_89"
+    mom_structure_lookback = 8
+    mom_lead_bars = 10
+
+    def init(self):
+        super().init()
+        d = self.data.df
+        feats = build_momentum_structure_features(
+            d, ma_col=self.mom_ma_col, structure_lookback=self.mom_structure_lookback,
+        )
+        self.mom_break_up = feats["mom_break_up"]
+        self.mom_break_down = feats["mom_break_down"]
+
+    def _extra_gates_ok(self, direction: str) -> bool:
+        i = len(self.data) - 1
+        lo = max(0, i - self.mom_lead_bars)
+        if direction == "long":
+            return bool(self.mom_break_up.iloc[lo:i + 1].any())
+        else:
+            return bool(self.mom_break_down.iloc[lo:i + 1].any())

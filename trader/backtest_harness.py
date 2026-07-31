@@ -18,7 +18,7 @@ to this before the fix. $100k clears it for the full 2016-2026 range.
 import pandas as pd
 from backtesting import Backtest
 
-from .l4_signal_model import ConfluenceStrategy, RegimeConfluenceStrategy
+from .l4_signal_model import ConfluenceStrategy, RegimeConfluenceStrategy, MomentumStructureConfluenceStrategy
 
 # ADX-gated grid. Kept for explicit opt-in / comparison runs
 # (pass strategy_cls=ConfluenceStrategy, optimize_kwargs=ADX_OPTIMIZE_KWARGS).
@@ -62,6 +62,15 @@ LIQUIDITY_OPTIMIZE_KWARGS = dict(
 
 # Same grid plus zone_lookback, for strategy_cls=SMCZoneLiquiditySweepStrategy.
 SMC_ZONE_LIQUIDITY_OPTIMIZE_KWARGS = dict(LIQUIDITY_OPTIMIZE_KWARGS, zone_lookback=[8, 15, 25])
+
+# Same grid as REGIME_OPTIMIZE_KWARGS plus the MSA momentum-structure
+# gate's own two tunables, for strategy_cls=MomentumStructureConfluenceStrategy
+# (see l4_signal_model.py for what the gate does).
+MOMENTUM_STRUCTURE_OPTIMIZE_KWARGS = dict(
+    REGIME_OPTIMIZE_KWARGS,
+    mom_structure_lookback=[5, 8, 15],
+    mom_lead_bars=[5, 10, 20],
+)
 
 
 def run_fold(df, train_start, train_end, test_end, cash=100_000, verbose=True,
