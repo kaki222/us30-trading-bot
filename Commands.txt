@@ -1,0 +1,30 @@
+How to open the mobile App: 
+Get-ProcessGet-Process | Where-Object { $_.ProcessName -like "*git*" }
+if nothing shows up them:
+Remove-Item .git\index.lock
+//
+cd C:\Users\milat\Documents\us30-trading-bot
+.\venv\Scripts\Activate.ps1
+
+python -m trader.l7_execution.mobile_api
+
+How to open the desktop App:
+ python -m trader.l7_execution.live_monitor
+
+Kevin:Davey: Develop Tradable Strategies Guided by
+a Desciplined Decision-making Process.
+
+Committing:
+cd C:\Users\milat\Documents\us30-trading-bot\
+git add -A
+git commit -m "Add CODEBASE_BACKBONE.md - architecture 
+mapfor learning reference"
+git push
+
+live_monitoring:
+python -m trader.l7_execution.live_monitor
+If MT5 isn't already open, or you have multiple terminals
+ installed, pass the real path explicitly:
+
+python -m trader.l7_execution.live_monitor 
+"C:\Program Files\MetaTrader 5\terminal64.exe"
