@@ -1247,16 +1247,87 @@ five hand-picked points - so no combination above should be treated as
 US30 and isn't obviously alive on Gold. A real verdict needs the full
 per-fold optimization pass this environment couldn't run.
 
-**Decision**: commit the infrastructure -
-`momentum_oscillator()`/`build_momentum_structure_features()`/
-`MomentumStructureConfluenceStrategy`/`MOMENTUM_STRUCTURE_OPTIMIZE_KWARGS`
-- real, tested (fixed-defaults + `test_mobile_api.py`'s existing chart
-render path, which now also exercises this file's swing_high/swing_low
-reuse indirectly), and reusable. Leave it **off by default**:
-`run_scheduled.py` and `live_monitor.py` keep using
-`RegimeConfluenceStrategy`, unaffected and unchanged. Treat
-`MomentumStructureConfluenceStrategy` as opt-in, same status as
-`SMCZoneConfluenceStrategy` - available for a proper walk-forward
-optimization pass (e.g. run from the user's own machine, which won't
-have this sandbox's compute ceiling) before it's trusted with real
-money, not a production default today.
+**Decision (superseded by the update below - kept for the record)**: commit
+the infrastructure - `momentum_oscillator()`/
+`build_momentum_structure_features()`/`MomentumStructureConfluenceStrategy`/
+`MOMENTUM_STRUCTURE_OPTIMIZE_KWARGS` - real, tested (fixed-defaults +
+`test_mobile_api.py`'s existing chart render path, which now also
+exercises this file's swing_high/swing_low reuse indirectly), and
+reusable. Leave it **off by default**: `run_scheduled.py` and
+`live_monitor.py` keep using `RegimeConfluenceStrategy`, unaffected and
+unchanged. Treat `MomentumStructureConfluenceStrategy` as opt-in, same
+status as `SMCZoneConfluenceStrategy` - available for a proper
+walk-forward optimization pass (e.g. run from the user's own machine,
+which won't have this sandbox's compute ceiling) before it's trusted
+with real money, not a production default today.
+
+---
+
+**Update (2026-08-01): the real per-fold optimization pass, run on the
+user's own machine.** The sandbox genuinely couldn't do this (a single
+fold with the full grid didn't finish in 45s there), so the user ran it
+themselves - which surfaced a real, separate bug on the way:
+`backtesting.py`'s own `Pool()` helper checks
+`multiprocessing.get_start_method()`, and on Windows that's always
+`'spawn'` - when it sees that, it silently falls back to a THREAD pool
+instead of real multiprocessing (to dodge pickling issues), so the
+user's cores weren't doing real parallel work. First attempt (US30, full
+exhaustive 1,728-combo grid, thread-pool-bound) took 28,575.5s (7.9h).
+Fixed by forcing `backtesting.Pool = multiprocessing.Pool` before any
+`optimize()` call - which also surfaced a second, smaller bug:
+`run_fold()`'s `param_names` extraction only excluded `maximize`/
+`constraint` from the optimize kwargs dict, so passing `method`/
+`max_tries` alongside the strategy grid (needed for a faster randomized
+search on Gold, see below) crashed with `AttributeError` trying to read
+them back off the strategy. Fixed by widening `run_fold()`'s exclusion
+set (`_OPTIMIZE_CONTROL_KWARGS`) to cover `backtesting.py`'s actual
+`optimize()`-control kwargs, not just the two this project had used
+until now.
+
+**Real per-fold `Backtest.optimize()` results, both baseline and
+momentum-gated freshly re-optimized on identical current data (fair,
+same-session comparison - the old fixed-defaults numbers above and this
+document's other headline numbers are from earlier data cutoffs, not
+directly comparable to these):**
+
+| | US30 baseline | US30 momentum-gated | Gold baseline | Gold momentum-gated |
+|---|---|---|---|---|
+| Compounded return | +24.75% | **+27.27%** | +28.74% | **+49.30%** |
+| Positive folds | 22/36 | 22/36 | 25/48 | 27/48 |
+| Trades | 251 | 253 | 235 | 226 |
+| Search | exhaustive, 192 combos/fold | exhaustive, 1,728 combos/fold | exhaustive, 192 combos/fold | **randomized, 200 of 1,728 combos/fold** |
+
+**One methodology asymmetry to flag plainly, not bury**: Gold's
+momentum-gated run used `max_tries=200` (randomized sampling of the
+1,728 admissible combos, ~11.6% coverage) instead of the exhaustive
+search every other number in this table got - a second, practical
+runtime fix on top of the multiprocessing one (even with real
+multiprocessing, the full exhaustive Gold grid was projected at ~6.5
+hours; the randomized version finished in 910.8s, ~15 minutes). 200
+random samples is a real, broad search, not a hand-picked spot check
+like the earlier five-point sweep - but it's not the same standard of
+rigor as US30's exhaustive run, and it's possible (not confirmed either
+way) that the true exhaustive-search number for Gold differs from
++49.30%, in either direction.
+
+**Verdict: real improvement on both instruments, this time under
+genuine out-of-sample per-fold optimization** - not a fixed-defaults
+spot check. US30: +2.52 points, same win-fold count, marginally more
+trades. Gold: +20.56 points, 2 more winning folds, and *fewer* trades
+(226 vs 235) - not "trade more and get lucky," genuinely more selective
+and more profitable. This is a materially stronger and more trustworthy
+result than the earlier "inconclusive" read, which was only ever a
+handful of fixed-parameter spot checks.
+
+**Decision, updated**: given a real, properly out-of-sample-tested
+improvement on both instruments, `MomentumStructureConfluenceStrategy`
+is a legitimate candidate to replace `RegimeConfluenceStrategy` as the
+production default in `run_scheduled.py`/`live_monitor.py` - but
+switching the strategy actually placing (dry-run or otherwise) trades is
+a real-money decision, not something to flip unilaterally off a doc
+update. Still off by default pending the user's explicit call, with one
+open item worth resolving first if it's going live: re-running Gold's
+leg with an exhaustive (not randomized) grid, now that the
+multiprocessing fix makes that tractable in a fraction of the original
+~12h estimate, to remove the one methodology asymmetry above before
+trusting the Gold number at face value.

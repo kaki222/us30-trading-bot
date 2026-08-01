@@ -73,6 +73,23 @@ MOMENTUM_STRUCTURE_OPTIMIZE_KWARGS = dict(
 )
 
 
+# Backtest.optimize()'s own control kwargs (maximize/constraint plus
+# everything else its signature accepts) - NOT strategy parameters, even
+# though they arrive in the same optimize_kwargs dict. Originally only
+# maximize/constraint were excluded here, which was fine as long as
+# nothing else in that dict was ever anything but a strategy param grid.
+# That broke (2026-08-01, user hit it directly trying method="sambo" to
+# cut a 1,728-combo-per-fold grid down to ~200 evaluations for speed) -
+# without this, param_names below would include "method"/"max_tries" and
+# then try getattr(opt_stats._strategy, "method"), which doesn't exist -
+# an immediate AttributeError, not a silent wrong answer, but a crash
+# either way for a fix that should just work.
+_OPTIMIZE_CONTROL_KWARGS = {
+    "maximize", "constraint", "method", "max_tries",
+    "return_heatmap", "return_optimization", "random_state",
+}
+
+
 def run_fold(df, train_start, train_end, test_end, cash=100_000, verbose=True,
              strategy_cls=RegimeConfluenceStrategy, optimize_kwargs=REGIME_OPTIMIZE_KWARGS):
     if verbose:
@@ -93,7 +110,7 @@ def run_fold(df, train_start, train_end, test_end, cash=100_000, verbose=True,
         train_slice = df.loc[train_start:train_end]
         bt_train = Backtest(train_slice, strategy_cls, cash=cash, commission=0.0002, margin=margin, finalize_trades=True)
         opt_stats = bt_train.optimize(**optimize_kwargs)
-        param_names = [k for k in optimize_kwargs if k not in ("maximize", "constraint")]
+        param_names = [k for k in optimize_kwargs if k not in _OPTIMIZE_CONTROL_KWARGS]
         params = {k: getattr(opt_stats._strategy, k) for k in param_names}
 
         bt_test = Backtest(test_slice, strategy_cls, cash=cash, commission=0.0002, margin=margin, finalize_trades=True)
