@@ -43,7 +43,7 @@ try:
 except ImportError:
     mt5 = None  # lets this module be imported/read on Linux; connect() raises clearly below
 
-from ..l2_features import sma, ema, macd, atr, adx
+from ..l2_features import sma, ema, macd, atr, adx, build_momentum_structure_features
 from ..l3_regime import efficiency_ratio
 from ..l5_position_sizing import risk_based_size
 
@@ -291,6 +291,56 @@ def evaluate_regime_confluence_signal(df: pd.DataFrame, er_threshold: float = 0.
     return {"signal": None}
 
 
+def evaluate_momentum_structure_signal(df: pd.DataFrame, er_threshold: float = 0.35,
+                                        swing_lookback: int = 20, atr_sl_mult: float = 1.5,
+                                        atr_tp_mult: float = 2.5, mom_ma_col: str = "ma_89",
+                                        mom_structure_lookback: int = 8, mom_lead_bars: int = 10) -> dict:
+    """
+    Hand-port of MomentumStructureConfluenceStrategy.next()'s entry logic
+    (l4_signal_model.py) - production default as of 2026-08-01, per the
+    real walk-forward optimization results in ARCHITECTURE.md's "Momentum
+    structural break gate" section (US30 +24.75% -> +27.27% compounded,
+    Gold +28.74% -> +49.88%, both freshly optimized, both improved).
+
+    Deliberately built as a wrapper around evaluate_regime_confluence_signal()
+    rather than a second copy of the five-condition entry logic - this
+    file already flags hand-porting l4_signal_model.py's rules as its
+    main structural weak point (see module docstring); duplicating the
+    base rule a second time here would make that worse, not better. Only
+    the ADDITIONAL momentum gate is new code, mirroring
+    MomentumStructureConfluenceStrategy._extra_gates_ok() exactly: same
+    l2_features.build_momentum_structure_features() call the backtest
+    class uses, same "did the oscillator break its own structure, same
+    direction, within the last mom_lead_bars bars" check, evaluated
+    against the same last-closed-bar `evaluate_regime_confluence_signal()`
+    already used.
+
+    mom_ma_col/mom_structure_lookback/mom_lead_bars default to
+    MomentumStructureConfluenceStrategy's own class defaults (not a
+    walk-forward-optimized fold's values) - same reasoning
+    run_scheduled.py already documents for PARAMS: a live system can't
+    replay "the latest fold's optimal parameters" without infrastructure
+    that doesn't exist yet, so it runs the strategy's stated defaults,
+    validated (not cherry-picked) by walk-forward across every fold.
+    """
+    base_signal = evaluate_regime_confluence_signal(
+        df, er_threshold=er_threshold, swing_lookback=swing_lookback,
+        atr_sl_mult=atr_sl_mult, atr_tp_mult=atr_tp_mult,
+    )
+    if base_signal["signal"] is None:
+        return base_signal
+
+    feats = build_momentum_structure_features(df, ma_col=mom_ma_col, structure_lookback=mom_structure_lookback)
+    i = len(df) - 1
+    lo = max(0, i - mom_lead_bars)
+    if base_signal["signal"] == "long":
+        gate_ok = bool(feats["mom_break_up"].iloc[lo:i + 1].any())
+    else:
+        gate_ok = bool(feats["mom_break_down"].iloc[lo:i + 1].any())
+
+    return base_signal if gate_ok else {"signal": None}
+
+
 # ---------------------------------------------------------------------
 # Layer 6 (circuit breaker), live version
 # ---------------------------------------------------------------------
@@ -516,14 +566,30 @@ def get_position_info(symbol: str, magic: int) -> dict | None:
 
 
 def run_once(symbol_key: str, params: dict, risk_pct: float = 0.01, leverage: float = 30,
-             magic: int = 100001, dry_run: bool = True, timeframe="H4") -> dict:
+             magic: int = 100001, dry_run: bool = True, timeframe="H4",
+             use_momentum_gate: bool = False) -> dict:
     """
     One polling cycle: fetch live bars -> compute features -> evaluate
-    RegimeConfluenceStrategy's entry rule -> check circuit breaker and
-    existing position -> place (or dry-run print) a trade if everything
-    clears. `params` are the optimized values from the latest
-    walk-forward fold (er_threshold, swing_lookback, atr_sl_mult,
-    atr_tp_mult) — see ARCHITECTURE.md for how to get current ones.
+    the entry rule -> check circuit breaker and existing position ->
+    place (or dry-run print) a trade if everything clears. `params` are
+    the strategy's own class defaults (er_threshold, swing_lookback,
+    atr_sl_mult, atr_tp_mult, plus mom_structure_lookback/mom_lead_bars
+    when use_momentum_gate=True) — see ARCHITECTURE.md for where these
+    come from and why they're defaults, not a specific fold's optimized
+    values.
+
+    use_momentum_gate=False (default, unchanged behavior): evaluates
+    RegimeConfluenceStrategy's entry rule via evaluate_regime_confluence_signal().
+    use_momentum_gate=True: evaluates MomentumStructureConfluenceStrategy's
+    entry rule instead (the same five conditions PLUS the momentum
+    structural-break gate) via evaluate_momentum_structure_signal() -
+    the production default as of 2026-08-01, per ARCHITECTURE.md's
+    walk-forward results (improved on both US30 and Gold, real per-fold
+    optimization, no remaining methodology caveats). Kept as an opt-in
+    flag rather than replacing evaluate_regime_confluence_signal()'s call
+    site outright so any other caller of run_once() (tests, ad-hoc
+    scripts) keeps its exact prior behavior unless it explicitly asks
+    for the new one.
 
     `timeframe` accepts a friendly string ("H1", "H4", "D1", ...) or a
     raw mt5.TIMEFRAME_* constant, and drives BOTH the live bar pull
@@ -547,13 +613,24 @@ def run_once(symbol_key: str, params: dict, risk_pct: float = 0.01, leverage: fl
         return {"action": "skip", "reason": "circuit breaker cooldown"}
 
     df = build_live_features(symbol, er_length=params.get("er_length", 20), timeframe=timeframe)
-    signal = evaluate_regime_confluence_signal(
-        df,
-        er_threshold=params.get("er_threshold", 0.35),
-        swing_lookback=params.get("swing_lookback", 20),
-        atr_sl_mult=params.get("atr_sl_mult", 1.5),
-        atr_tp_mult=params.get("atr_tp_mult", 2.5),
-    )
+    if use_momentum_gate:
+        signal = evaluate_momentum_structure_signal(
+            df,
+            er_threshold=params.get("er_threshold", 0.35),
+            swing_lookback=params.get("swing_lookback", 20),
+            atr_sl_mult=params.get("atr_sl_mult", 1.5),
+            atr_tp_mult=params.get("atr_tp_mult", 2.5),
+            mom_structure_lookback=params.get("mom_structure_lookback", 8),
+            mom_lead_bars=params.get("mom_lead_bars", 10),
+        )
+    else:
+        signal = evaluate_regime_confluence_signal(
+            df,
+            er_threshold=params.get("er_threshold", 0.35),
+            swing_lookback=params.get("swing_lookback", 20),
+            atr_sl_mult=params.get("atr_sl_mult", 1.5),
+            atr_tp_mult=params.get("atr_tp_mult", 2.5),
+        )
     if signal["signal"] is None:
         return {"action": "skip", "reason": "no signal"}
 

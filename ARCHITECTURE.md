@@ -1323,5 +1323,50 @@ now-fully-exhaustive improvement on both instruments,
 replace `RegimeConfluenceStrategy` as the production default in
 `run_scheduled.py`/`live_monitor.py`. No remaining methodology gaps -
 this is purely the user's call now (a real-money decision, not something
-to flip unilaterally off a doc update). Still off by default pending
-that explicit go-ahead.
+to flip unilaterally off a doc update).
+
+**Flipped live (2026-08-01, user's explicit go-ahead).**
+`run_scheduled.py`'s `USE_MOMENTUM_GATE = True` is now the production
+setting - one flag, one place, flip it back to `False` to revert. Since
+`live_monitor.py`/`run_scheduled.py` don't call
+`l4_signal_model.RegimeConfluenceStrategy` directly (backtesting.py's
+`Strategy` class is a backtest-loop construct, can't be driven live -
+see this file's module docstring), this required a new hand-ported live
+function rather than just swapping an import:
+
+- `evaluate_momentum_structure_signal()` (`l7_execution/__init__.py`) -
+  deliberately a thin wrapper around the existing
+  `evaluate_regime_confluence_signal()` (calls it, then ANDs on the
+  momentum-break gate via the same `l2_features.build_momentum_structure_features()`
+  the backtest class uses) rather than a second full copy of the
+  five-condition entry rule - avoids doubling this file's already-flagged
+  duplication problem.
+- `run_once(..., use_momentum_gate: bool = False)` - new opt-in
+  parameter, defaults `False` so any other caller (the manual real-terminal
+  test scripts, `test_signal_readonly.py`, etc.) keeps its exact prior
+  behavior unless it explicitly asks for the new path.
+- `run_scheduled.py`'s `PARAMS` gained `mom_structure_lookback`/
+  `mom_lead_bars` (the strategy's own class defaults - 8 and 10 - same
+  "defaults, not one fold's optimized values" reasoning already used for
+  `er_threshold`/`swing_lookback`/etc.), and both `_preview_signal()` and
+  the `run_once()` call site now read `USE_MOMENTUM_GATE` so the bias-
+  comparison preview always matches what the real cycle will decide.
+- Verified via a new fully-mocked, sandbox-runnable test
+  (`test_momentum_gate.py`, no MT5 terminal needed since the functions
+  under test are pure pandas plus mocked glue) - 13 checks: the gate
+  correctly passes/blocks a long or short signal based on whether/when
+  the momentum oscillator broke structure, short-circuits without
+  computing momentum features when there's no base signal to gate, and
+  `run_once()` correctly branches to the new function only when
+  `use_momentum_gate=True` while leaving the old default path (and every
+  existing caller) untouched. Also ran a real (unmocked) end-to-end call
+  on synthetic data to confirm the actual computation path doesn't raise.
+- `live_monitor.py` needed no changes - it never calls `run_once()` or
+  either `evaluate_*_signal()` function; it only independently computes
+  indicators for display.
+
+`dry_run` stays hardcoded `True` in `run_scheduled.py` regardless of
+this change - the flip only changes WHICH rule decides "is there a
+signal," not whether real orders get placed automatically. That's still
+never true from this script, no orders are placed here without a click
+in the mobile app.

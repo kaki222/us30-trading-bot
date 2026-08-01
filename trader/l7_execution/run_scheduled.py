@@ -24,11 +24,20 @@ magic across the test scripts was chosen specifically to stay out of
 this one's way. H4 because the 2026-07-24 timeframe sweep found H4
 clearly the best of H1/H4/D1 for this strategy - see ARCHITECTURE.md.
 
+Production strategy (2026-08-01): USE_MOMENTUM_GATE=True runs
+MomentumStructureConfluenceStrategy's rule (evaluate_momentum_structure_signal())
+instead of the older RegimeConfluenceStrategy one - real, fully
+exhaustive walk-forward optimization found it beats the baseline on
+both US30 and Gold, see ARCHITECTURE.md. Flip USE_MOMENTUM_GATE back to
+False above to revert to the old baseline rule; nothing else in this
+file needs to change either way, since _preview_signal()/run_once() both
+read that one flag.
+
 Manual bias override (2026-07-25, made live-editable 2026-07-25):
 lets you layer your own discretionary chart read (Elliott/Wyckoff or
-otherwise) on top of the mechanical RegimeConfluenceStrategy signal,
-WITHOUT touching l4_signal_model.py or
-evaluate_regime_confluence_signal() at all — the strategy's actual
+otherwise) on top of the mechanical signal, WITHOUT touching
+l4_signal_model.py or evaluate_regime_confluence_signal()/
+evaluate_momentum_structure_signal() at all — the strategy's actual
 entry rule stays exactly as walk-forward-tested. Set to "long" or
 "short" when you have a real discretionary view (e.g. watching GOLD
 test the 4,165/4,180 shelf); leave it at its default None to let the
@@ -98,7 +107,8 @@ from datetime import datetime, timezone
 
 from . import (
     connect, shutdown, account_summary, run_once, get_live_bars,
-    build_live_features, evaluate_regime_confluence_signal, SYMBOL_MAP,
+    build_live_features, evaluate_regime_confluence_signal,
+    evaluate_momentum_structure_signal, SYMBOL_MAP,
 )
 from .journal import append_entry
 from .manual_overrides import load_overrides
@@ -106,13 +116,28 @@ from .manual_overrides import load_overrides
 MAGIC = 100001  # the "real" one - see module docstring
 TIMEFRAME = "H4"  # confirmed best via the 2026-07-24 timeframe sweep
 
-# RegimeConfluenceStrategy's own class defaults (l4_signal_model.py) -
-# using these rather than re-deriving "the latest optimized fold's
-# params" keeps this script simple and matches exactly what
-# test_run_once.py already exercised as "real_params". Revisit if/when
-# a process exists for picking up the latest walk-forward fold's
-# optimized values automatically instead.
-PARAMS = {"er_threshold": 0.35, "swing_lookback": 20, "atr_sl_mult": 1.5, "atr_tp_mult": 2.5}
+# Production strategy flip (2026-08-01, user's call, backed by real
+# walk-forward numbers): MomentumStructureConfluenceStrategy beat
+# RegimeConfluenceStrategy on BOTH instruments once fully, exhaustively
+# optimized per-fold - US30 +24.75% -> +27.27% compounded, Gold +28.74%
+# -> +49.88% (confirmed stable across two independent search methods,
+# randomized vs exhaustive - see ARCHITECTURE.md's "Momentum structural
+# break gate" section for the full numbers and methodology). One flag,
+# one place - flip back to False to revert to the old baseline rule.
+USE_MOMENTUM_GATE = True
+
+# Strategy class defaults (l4_signal_model.py) - using these rather than
+# re-deriving "the latest optimized fold's params" keeps this script
+# simple and matches exactly what test_run_once.py already exercised as
+# "real_params". Revisit if/when a process exists for picking up the
+# latest walk-forward fold's optimized values automatically instead.
+# mom_structure_lookback/mom_lead_bars only apply when USE_MOMENTUM_GATE
+# is True - harmless extra keys in PARAMS otherwise, since run_once()
+# only reads them via params.get(...) when use_momentum_gate=True.
+PARAMS = {
+    "er_threshold": 0.35, "swing_lookback": 20, "atr_sl_mult": 1.5, "atr_tp_mult": 2.5,
+    "mom_structure_lookback": 8, "mom_lead_bars": 10,
+}
 
 # --- manual discretionary bias / key levels / paused_now (see module
 # docstring) - now live in data/manual_overrides.json via
@@ -135,15 +160,27 @@ PAUSE_WINDOWS = {
 
 def _preview_signal(symbol_key: str) -> dict:
     """
-    Read-only peek at what evaluate_regime_confluence_signal() would
-    return right now for symbol_key, computed exactly the way
-    run_once() computes it internally. Does NOT place anything and does
+    Read-only peek at what run_once() would evaluate as the mechanical
+    signal right now for symbol_key - evaluate_momentum_structure_signal()
+    when USE_MOMENTUM_GATE (the production default), else
+    evaluate_regime_confluence_signal(), always matching whichever one
+    run_once() below will actually use. Does NOT place anything and does
     NOT check open positions or the circuit breaker - it exists purely
     to compare the mechanical signal's direction against BIAS before
     deciding whether to let run_once() proceed normally.
     """
     symbol = SYMBOL_MAP[symbol_key]
     df = build_live_features(symbol, er_length=PARAMS.get("er_length", 20), timeframe=TIMEFRAME)
+    if USE_MOMENTUM_GATE:
+        return evaluate_momentum_structure_signal(
+            df,
+            er_threshold=PARAMS["er_threshold"],
+            swing_lookback=PARAMS["swing_lookback"],
+            atr_sl_mult=PARAMS["atr_sl_mult"],
+            atr_tp_mult=PARAMS["atr_tp_mult"],
+            mom_structure_lookback=PARAMS["mom_structure_lookback"],
+            mom_lead_bars=PARAMS["mom_lead_bars"],
+        )
     return evaluate_regime_confluence_signal(
         df,
         er_threshold=PARAMS["er_threshold"],
@@ -231,6 +268,7 @@ def main():
             risk_pct=risk_pct, leverage=30, magic=MAGIC,
             dry_run=True,  # see module docstring - deliberate, not a flag
             timeframe=TIMEFRAME,
+            use_momentum_gate=USE_MOMENTUM_GATE,
         )
         append_entry(symbol_key, TIMEFRAME, MAGIC, result, context=context)
         print(f"  {symbol_key}: {result['action']}"
